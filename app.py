@@ -154,7 +154,7 @@ HTML_PAGE = """<!DOCTYPE html>
         let hasActiveTrade = false;
         let currentCoin = "BTCUSDT";
 
-        function renderChart(containerId, symbol, interval, titleElemId, labelPrefix) {
+                function renderChart(containerId, symbol, interval, titleElemId, labelPrefix) {
             document.getElementById(titleElemId).innerText = `${labelPrefix}: BINANCE:${symbol}`;
             document.getElementById(containerId).innerHTML = '';
 
@@ -168,15 +168,33 @@ HTML_PAGE = """<!DOCTYPE html>
                 "locale": "en",
                 "toolbar_bg": "#1e293b",
                 "enable_publishing": false,
-                "hide_side_toolbar": true,
-                "allow_symbol_change": false,
+                "withdateranges": false,
+                "hide_side_toolbar": false,
+                "allow_symbol_change": true,
                 "container_id": containerId,
                 "studies": [
-                    { "id": "Keltner Channels@tv-basicstudies", "inputs": { "length": 20, "mult": 1.0 } },
-                    { "id": "RSI@tv-basicstudies", "inputs": { "length": 14 } }
-                ]
+                    {
+                        "id": "KeltnerChannels@tv-basicstudies",
+                        "inputs": {
+                            "length": 20,
+                            "mult": 1.0
+                        }
+                    },
+                    {
+                        "id": "RSI@tv-basicstudies",
+                        "inputs": {
+                            "length": 14
+                        }
+                    }
+                ],
+                "studies_overrides": {
+                    "keltner channels.plot.color": "#38bdf8",
+                    "keltner channels.upper.color": "#10b981",
+                    "keltner channels.lower.color": "#ef4444"
+                }
             });
         }
+
 
         function setSymbol(symbol) {
             currentCoin = symbol;
