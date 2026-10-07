@@ -1,5 +1,4 @@
 import os
-import requests
 from flask import Flask, jsonify, request, render_template_string
 
 app = Flask(__name__)
@@ -9,7 +8,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Crypto Scanner | Auto Lot Size & Live Indicators</title>
+    <title>Multi-Timeframe Terminal & Risk Controller</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
@@ -21,7 +20,7 @@ HTML_PAGE = """<!DOCTYPE html>
         .badge-short { background-color: #ef4444; color: white; padding: 4px 8px; border-radius: 5px; font-weight: bold; }
         .badge-neutral { background-color: #475569; color: #cbd5e1; padding: 4px 8px; border-radius: 5px; }
         .coin-link { cursor: pointer; text-decoration: underline; color: #38bdf8; }
-        #chart-container { height: 420px; width: 100%; border-radius: 8px; overflow: hidden; }
+        .chart-box { height: 380px; width: 100%; border-radius: 8px; overflow: hidden; }
         .modal-content { background-color: #1e293b; color: #f8fafc; border: 1px solid #475569; }
         .form-control, .form-select { background-color: #0f172a; border: 1px solid #334155; color: #f8fafc; }
         .active-trade-box { background: rgba(56, 189, 248, 0.1); border: 1px solid #0284c7; border-radius: 8px; }
@@ -29,21 +28,23 @@ HTML_PAGE = """<!DOCTYPE html>
 </head>
 <body class="p-2 p-md-3">
     <div class="container-fluid">
+        <!-- Header -->
         <div class="d-flex justify-content-between align-items-center mb-3">
             <div>
                 <h5 class="fw-bold text-primary mb-0">Multi-Timeframe Terminal & Risk Controller</h5>
                 <div class="small text-secondary mt-1">
                     Capital: <b class="text-white" id="lbl-capital">₹10,000</b> | 
-                    Risk: <b class="text-warning" id="lbl-risk">₹500</b> | 
+                    Risk/Trade: <b class="text-warning" id="lbl-risk">₹500 (Fixed SL)</b> | 
                     Lock: <b class="text-info">1 Trade Only</b>
                 </div>
             </div>
             <div>
-                <button class="btn btn-outline-info btn-sm me-2" data-bs-toggle="modal" data-bs-target="#settingsModal">⚙ Settings</button>
-                <span id="last-tick" class="small text-muted">Loading...</span>
+                <button class="btn btn-outline-info btn-sm me-2" data-bs-toggle="modal" data-bs-target="#settingsModal">⚙ Broker & Capital Settings</button>
+                <span id="last-tick" class="small text-muted">Updating...</span>
             </div>
         </div>
 
+        <!-- Active Position Lock -->
         <div id="active-trade-container" class="mb-3 d-none">
             <div class="p-3 active-trade-box d-flex justify-content-between align-items-center">
                 <div>
@@ -54,87 +55,223 @@ HTML_PAGE = """<!DOCTYPE html>
             </div>
         </div>
 
-        <div class="card p-2 shadow-lg mb-3">
-            <div class="d-flex justify-content-between align-items-center px-2 mb-2">
-                <span class="fw-bold small text-info" id="active-coin-title">Chart: BINANCE:BTCUSDT</span>
-                <small class="text-muted">Tap coin below to change</small>
+        <!-- Dual Charts: 1D and 1H Side-by-Side -->
+        <div class="row g-2 mb-3">
+            <div class="col-12 col-lg-6">
+                <div class="card p-2 shadow-lg">
+                    <div class="px-2 mb-1 d-flex justify-content-between">
+                        <span class="fw-bold small text-info" id="chart-d-title">1D Chart: BINANCE:BTCUSDT</span>
+                        <small class="text-muted">KC (20, 1.0) + RSI</small>
+                    </div>
+                    <div id="chart-container-1d" class="chart-box"></div>
+                </div>
             </div>
-            <div id="chart-container"></div>
+            <div class="col-12 col-lg-6">
+                <div class="card p-2 shadow-lg">
+                    <div class="px-2 mb-1 d-flex justify-content-between">
+                        <span class="fw-bold small text-warning" id="chart-h-title">1H Chart: BINANCE:BTCUSDT</span>
+                        <small class="text-muted">KC (20, 1.0) + RSI</small>
+                    </div>
+                    <div id="chart-container-1h" class="chart-box"></div>
+                </div>
+            </div>
         </div>
 
+        <!-- Scanner Table -->
         <div class="card p-2 p-md-3 shadow-lg">
             <div class="table-responsive">
                 <table class="table table-dark table-hover align-middle mb-0 text-center">
                     <thead>
                         <tr class="text-secondary small">
                             <th>Coin</th>
-                            <th>Price</th>
-                            <th>1D RSI</th>
+                            <th>Live Price</th>
+                            <th>Daily RSI</th>
                             <th>1H RSI</th>
-                            <th>Signal</th>
-                            <th>SL</th>
-                            <th>Target</th>
-                            <th class="text-warning">Lot (₹500)</th>
+                            <th>Setup Signal</th>
+                            <th>Buffer SL</th>
+                            <th>1:2 Target</th>
+                            <th class="text-warning">Auto Lot (₹500 Risk)</th>
                             <th>Action</th>
                         </tr>
                     </thead>
                     <tbody id="scanner-table">
-                        <tr><td colspan="9" class="text-center py-4">Connecting live market scanner...</td></tr>
+                        <tr><td colspan="9" class="text-center py-4 text-info">Scanning market candles...</td></tr>
                     </tbody>
                 </table>
             </div>
         </div>
     </div>
 
+    <!-- Broker & API Settings Modal -->
     <div class="modal fade" id="settingsModal" tabindex="-1">
         <div class="modal-dialog">
             <div class="modal-content">
                 <div class="modal-header border-secondary">
-                    <h5 class="modal-title">Capital & Broker Settings</h5>
+                    <h5 class="modal-title">Capital & Broker Configuration</h5>
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
                     <div class="row mb-3">
                         <div class="col-6">
-                            <label class="form-label">Capital (INR)</label>
+                            <label class="form-label">Total Capital (INR)</label>
                             <input type="number" class="form-control" id="cfg-capital" value="10000">
                         </div>
                         <div class="col-6">
-                            <label class="form-label">Max Risk (INR)</label>
+                            <label class="form-label">Max Risk / SL (INR)</label>
                             <input type="number" class="form-control" id="cfg-risk" value="500">
                         </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Select Broker</label>
+                        <select class="form-select" id="cfg-broker">
+                            <option value="delta">Delta Exchange India</option>
+                            <option value="coinswitch">CoinSwitch Pro</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">API Key</label>
+                        <input type="text" class="form-control" id="cfg-api-key" placeholder="Enter API Key">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">API Secret</label>
+                        <input type="password" class="form-control" id="cfg-api-secret" placeholder="Enter API Secret">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">API PIN / Password</label>
+                        <input type="password" class="form-control" id="cfg-api-pin" placeholder="Enter API PIN">
                     </div>
                 </div>
                 <div class="modal-footer border-secondary">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="button" class="btn btn-primary" onclick="saveSettings()">Save</button>
+                    <button type="button" class="btn btn-primary" onclick="saveSettings()">Save & Connect</button>
                 </div>
             </div>
         </div>
     </div>
 
     <script>
+        const COINS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"];
         let hasActiveTrade = false;
+        let currentCoin = "BTCUSDT";
 
-        function loadTradingViewChart(symbol) {
-            document.getElementById('active-coin-title').innerText = "Chart: BINANCE:" + symbol;
-            document.getElementById('chart-container').innerHTML = '';
+        function renderChart(containerId, symbol, interval, titleElemId, labelPrefix) {
+            document.getElementById(titleElemId).innerText = `${labelPrefix}: BINANCE:${symbol}`;
+            document.getElementById(containerId).innerHTML = '';
+
+            new TradingView.widget({
+                "autosize": true,
+                "symbol": "BINANCE:" + symbol,
+                "interval": interval,
+                "timezone": "Asia/Kolkata",
+                "theme": "dark",
+                "style": "1",
+                "locale": "en",
+                "toolbar_bg": "#1e293b",
+                "enable_publishing": false,
+                "hide_side_toolbar": true,
+                "allow_symbol_change": false,
+                "container_id": containerId,
+                "studies": [
+                    { "id": "Keltner Channels@tv-basicstudies", "inputs": { "length": 20, "mult": 1.0 } },
+                    { "id": "RSI@tv-basicstudies", "inputs": { "length": 14 } }
+                ]
+            });
+        }
+
+        function setSymbol(symbol) {
+            currentCoin = symbol;
+            renderChart("chart-container-1d", symbol, "D", "chart-d-title", "1D Chart");
+            renderChart("chart-container-1h", symbol, "60", "chart-h-title", "1H Chart");
+        }
+
+        function calculateRSI(closes) {
+            if (closes.length < 15) return 50.0;
+            let gains = 0, losses = 0;
+            for (let i = 1; i <= 14; i++) {
+                let diff = closes[i] - closes[i - 1];
+                if (diff >= 0) gains += diff;
+                else losses += Math.abs(diff);
+            }
+            let avgGain = gains / 14;
+            let avgLoss = losses / 14;
+            for (let i = 15; i < closes.length; i++) {
+                let diff = closes[i] - closes[i - 1];
+                avgGain = (avgGain * 13 + (diff > 0 ? diff : 0)) / 14;
+                avgLoss = (avgLoss * 13 + (diff < 0 ? Math.abs(diff) : 0)) / 14;
+            }
+            if (avgLoss === 0) return 100.0;
+            let rs = avgGain / avgLoss;
+            return (100 - (100 / (1 + rs))).toFixed(2);
+        }
+
+        async function fetchCandleRSI(symbol, interval) {
             try {
-                new TradingView.widget({
-                    "autosize": true,
-                    "symbol": "BINANCE:" + symbol,
-                    "interval": "60",
-                    "timezone": "Asia/Kolkata",
-                    "theme": "dark",
-                    "style": "1",
-                    "locale": "en",
-                    "toolbar_bg": "#1e293b",
-                    "enable_publishing": false,
-                    "hide_side_toolbar": false,
-                    "allow_symbol_change": true,
-                    "container_id": "chart-container"
-                });
-            } catch(e) {}
+                const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=50`);
+                const data = await res.json();
+                const closes = data.map(k => parseFloat(k[4]));
+                return calculateRSI(closes);
+            } catch(e) {
+                return 50.0;
+            }
+        }
+
+        async function scanMarket() {
+            const riskINR = parseFloat(document.getElementById('cfg-risk').value || 500);
+            const riskUSD = riskINR / 90.0;
+            const tbody = document.getElementById('scanner-table');
+            let rows = '';
+
+            for (const sym of COINS) {
+                try {
+                    const [pRes, dRSI, hRSI] = await Promise.all([
+                        fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${sym}`).then(r => r.json()),
+                        fetchCandleRSI(sym, "1d"),
+                        fetchCandleRSI(sym, "1h")
+                    ]);
+
+                    const price = parseFloat(pRes.price);
+                    let signal = 'NEUTRAL', badge = 'badge-neutral';
+                    let sl = '-', target = '-', lot = '-';
+
+                    if (dRSI > 58 && hRSI > 52) {
+                        signal = 'STRONG LONG';
+                        badge = 'badge-long';
+                        const slVal = +(price * 0.985).toFixed(2);
+                        sl = slVal;
+                        target = +(price * 1.03).toFixed(2);
+                        lot = (riskUSD / Math.abs(price - slVal)).toFixed(4);
+                    } else if (dRSI < 42 && hRSI < 48) {
+                        signal = 'STRONG SHORT';
+                        badge = 'badge-short';
+                        const slVal = +(price * 1.015).toFixed(2);
+                        sl = slVal;
+                        target = +(price * 0.97).toFixed(2);
+                        lot = (riskUSD / Math.abs(slVal - price)).toFixed(4);
+                    }
+
+                    const disable = (hasActiveTrade || signal === 'NEUTRAL') ? 'disabled' : '';
+
+                    rows += `
+                        <tr>
+                            <td class="fw-bold coin-link" onclick="setSymbol('${sym}')">${sym}</td>
+                            <td>$${price}</td>
+                            <td class="${dRSI > 60 ? 'text-success' : (dRSI < 40 ? 'text-danger' : '')}">${dRSI}</td>
+                            <td class="${hRSI > 55 ? 'text-success' : (hRSI < 45 ? 'text-danger' : '')}">${hRSI}</td>
+                            <td><span class="${badge}">${signal}</span></td>
+                            <td class="text-warning">${sl !== '-' ? '$' + sl : '-'}</td>
+                            <td class="text-info">${target !== '-' ? '$' + target : '-'}</td>
+                            <td class="fw-bold text-warning">${lot}</td>
+                            <td>
+                                <button class="btn btn-sm btn-success px-2 py-0" ${disable} onclick="placeTrade('${sym}', 'buy', '${lot}', '${sl}', '${target}')">Buy</button>
+                                <button class="btn btn-sm btn-danger px-2 py-0 ms-1" ${disable} onclick="placeTrade('${sym}', 'sell', '${lot}', '${sl}', '${target}')">Sell</button>
+                            </td>
+                        </tr>
+                    `;
+                } catch(e) {}
+            }
+
+            if (rows) tbody.innerHTML = rows;
+            document.getElementById('last-tick').innerText = 'Tick: ' + new Date().toLocaleTimeString();
         }
 
         async function fetchConfig() {
@@ -142,24 +279,33 @@ HTML_PAGE = """<!DOCTYPE html>
                 const res = await fetch('/api/config');
                 const data = await res.json();
                 document.getElementById('lbl-capital').innerText = "₹" + (data.capital_inr || 10000);
-                document.getElementById('lbl-risk').innerText = "₹" + (data.max_risk_inr || 500);
+                document.getElementById('lbl-risk').innerText = "₹" + (data.max_risk_inr || 500) + " (Fixed SL)";
                 document.getElementById('cfg-capital').value = data.capital_inr || 10000;
                 document.getElementById('cfg-risk').value = data.max_risk_inr || 500;
+                document.getElementById('cfg-broker').value = data.broker || 'delta';
+                document.getElementById('cfg-api-key').value = data.api_key || '';
+                document.getElementById('cfg-api-pin').value = data.api_pin || '';
             } catch(e){}
         }
 
         async function saveSettings() {
             const payload = {
                 capital_inr: document.getElementById('cfg-capital').value,
-                max_risk_inr: document.getElementById('cfg-risk').value
+                max_risk_inr: document.getElementById('cfg-risk').value,
+                broker: document.getElementById('cfg-broker').value,
+                api_key: document.getElementById('cfg-api-key').value,
+                api_secret: document.getElementById('cfg-api-secret').value,
+                api_pin: document.getElementById('cfg-api-pin').value
             };
             await fetch('/api/config', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(payload)
             });
+            alert('Settings & Broker Credentials Saved!');
             fetchConfig();
             bootstrap.Modal.getInstance(document.getElementById('settingsModal')).hide();
+            scanMarket();
         }
 
         async function checkTradeState() {
@@ -171,7 +317,7 @@ HTML_PAGE = """<!DOCTYPE html>
                     hasActiveTrade = true;
                     container.classList.remove('d-none');
                     const t = data.active_trade;
-                    document.getElementById('at-details').innerText = `${t.symbol} | ${t.side} | Qty: ${t.qty} | SL: $${t.sl}`;
+                    document.getElementById('at-details').innerText = `${t.symbol} | ${t.side.toUpperCase()} | Lot: ${t.qty} | SL: $${t.sl} | Target: $${t.target}`;
                 } else {
                     hasActiveTrade = false;
                     container.classList.add('d-none');
@@ -180,15 +326,18 @@ HTML_PAGE = """<!DOCTYPE html>
         }
 
         async function closeActiveTrade() {
+            if (!confirm("Close/reset active position lock?")) return;
             await fetch('/api/close_active_trade', { method: 'POST' });
             checkTradeState();
         }
 
-        async function placeAutoOrder(symbol, side, qty, sl, target) {
+        async function placeTrade(symbol, side, qty, sl, target) {
             if (hasActiveTrade) {
-                alert("Trade lock active! Reset first.");
+                alert("Only 1 active position allowed! Please close current position.");
                 return;
             }
+            if (!confirm(`Execute ${side.toUpperCase()} on ${symbol}?\nLot: ${qty}\nRisk: ₹500`)) return;
+
             const res = await fetch('/api/order', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -199,74 +348,27 @@ HTML_PAGE = """<!DOCTYPE html>
             checkTradeState();
         }
 
-        async function streamData() {
-            try {
-                const res = await fetch('/api/scan');
-                const data = await res.json();
-                const tbody = document.getElementById('scanner-table');
-                let rowsHtml = '';
-
-                data.forEach(coin => {
-                    let badge = 'badge-neutral';
-                    if (coin.signal === 'STRONG LONG') badge = 'badge-long';
-                    if (coin.signal === 'STRONG SHORT') badge = 'badge-short';
-
-                    rowsHtml += `
-                        <tr>
-                            <td class="fw-bold coin-link" onclick="loadTradingViewChart('${coin.clean_sym}')">${coin.symbol}</td>
-                            <td>$${coin.price}</td>
-                            <td>${coin.daily_rsi}</td>
-                            <td>${coin.h1_rsi}</td>
-                            <td><span class="${badge}">${coin.signal}</span></td>
-                            <td class="text-warning">${coin.sl !== '-' ? '$' + coin.sl : '-'}</td>
-                            <td class="text-info">${coin.target !== '-' ? '$' + coin.target : '-'}</td>
-                            <td class="fw-bold text-warning">${coin.lot_size}</td>
-                            <td>
-                                <button class="btn btn-sm btn-success px-2 py-0" onclick="placeAutoOrder('${coin.clean_sym}', 'buy', '${coin.lot_size}', '${coin.sl}', '${coin.target}')">Buy</button>
-                                <button class="btn btn-sm btn-danger px-2 py-0 ms-1" onclick="placeAutoOrder('${coin.clean_sym}', 'sell', '${coin.lot_size}', '${coin.sl}', '${coin.target}')">Sell</button>
-                            </td>
-                        </tr>
-                    `;
-                });
-                if(rowsHtml) tbody.innerHTML = rowsHtml;
-                document.getElementById('last-tick').innerText = new Date().toLocaleTimeString();
-            } catch (err) {}
-        }
-
-        loadTradingViewChart('BTCUSDT');
+        // Initialize Dual Charts & Scanner
+        setSymbol('BTCUSDT');
         fetchConfig();
         checkTradeState();
-        streamData();
-        setInterval(streamData, 4000);
+        scanMarket();
+        setInterval(scanMarket, 5000);
+        setInterval(checkTradeState, 4000);
     </script>
 </body>
 </html>
 """
 
-config = {"capital_inr": 10000, "max_risk_inr": 500}
+config = {
+    "capital_inr": 10000,
+    "max_risk_inr": 500,
+    "broker": "delta",
+    "api_key": "",
+    "api_secret": "",
+    "api_pin": ""
+}
 trade_state = {"active_trade": None}
-PAIRS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
-
-def get_rsi(symbol, interval):
-    try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit=20"
-        res = requests.get(url, timeout=3).json()
-        closes = [float(k[4]) for k in res]
-        gains, losses = [], []
-        for i in range(1, len(closes)):
-            diff = closes[i] - closes[i - 1]
-            if diff >= 0:
-                gains.append(diff)
-                losses.append(0)
-            else:
-                gains.append(0)
-                losses.append(abs(diff))
-        avg_g = sum(gains[-14:]) / 14
-        avg_l = sum(losses[-14:]) / 14
-        if avg_l == 0: return 100.0
-        return round(100 - (100 / (1 + (avg_g / avg_l))), 2)
-    except:
-        return 50.0
 
 @app.route("/")
 def home():
@@ -294,52 +396,7 @@ def close_trade():
 def order():
     global trade_state
     trade_state["active_trade"] = request.json
-    return jsonify({"message": "Trade position logged & locked!"})
-
-@app.route("/api/scan")
-def scan():
-    results = []
-    risk_usd = float(config.get("max_risk_inr", 500)) / 90.0
-
-    for sym in PAIRS:
-        try:
-            r = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={sym}", timeout=3).json()
-            price = float(r["price"])
-            d_rsi = get_rsi(sym, "1d")
-            h_rsi = get_rsi(sym, "1h")
-
-            signal = "NEUTRAL"
-            sl, target, lot = "-", "-", "-"
-
-            if d_rsi > 58 and h_rsi > 52:
-                signal = "STRONG LONG"
-                sl_val = round(price * 0.985, 2)
-                sl = str(sl_val)
-                target = str(round(price * 1.03, 2))
-                diff = abs(price - sl_val)
-                lot = str(round(risk_usd / diff, 4)) if diff > 0 else "-"
-            elif d_rsi < 42 and h_rsi < 48:
-                signal = "STRONG SHORT"
-                sl_val = round(price * 1.015, 2)
-                sl = str(sl_val)
-                target = str(round(price * 0.97, 2))
-                diff = abs(sl_val - price)
-                lot = str(round(risk_usd / diff, 4)) if diff > 0 else "-"
-
-            results.append({
-                "symbol": sym,
-                "clean_sym": sym,
-                "price": price,
-                "daily_rsi": d_rsi,
-                "h1_rsi": h_rsi,
-                "signal": signal,
-                "sl": sl,
-                "target": target,
-                "lot_size": lot
-            })
-        except:
-            continue
-    return jsonify(results)
+    return jsonify({"message": f"Order submitted for {request.json.get('symbol')} via {config.get('broker')}!"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
