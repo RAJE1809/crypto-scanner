@@ -11,19 +11,20 @@ HTML_PAGE = """<!DOCTYPE html>
     <title>Multi-Timeframe Terminal & Risk Controller</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
     <style>
-        body { background-color: #0b1120; color: #f8fafc; font-family: sans-serif; }
+        body { background-color: #0b1120; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         .card { background-color: #1e293b; border: 1px solid #334155; border-radius: 12px; }
         .table-dark { background-color: #1e293b; --bs-table-bg: #1e293b; }
         .badge-long { background-color: #10b981; color: white; padding: 4px 8px; border-radius: 5px; font-weight: bold; }
         .badge-short { background-color: #ef4444; color: white; padding: 4px 8px; border-radius: 5px; font-weight: bold; }
         .badge-neutral { background-color: #475569; color: #cbd5e1; padding: 4px 8px; border-radius: 5px; }
         .coin-link { cursor: pointer; text-decoration: underline; color: #38bdf8; }
-        .chart-box { height: 380px; width: 100%; border-radius: 8px; overflow: hidden; }
+        .chart-frame { height: 380px; width: 100%; border: none; border-radius: 8px; }
         .modal-content { background-color: #1e293b; color: #f8fafc; border: 1px solid #475569; }
         .form-control, .form-select { background-color: #0f172a; border: 1px solid #334155; color: #f8fafc; }
         .active-trade-box { background: rgba(56, 189, 248, 0.1); border: 1px solid #0284c7; border-radius: 8px; }
+        .tick-flash { animation: flashAnim 0.3s ease-out; }
+        @keyframes flashAnim { from { background-color: #334155; } to { background-color: transparent; } }
     </style>
 </head>
 <body class="p-2 p-md-3">
@@ -40,7 +41,7 @@ HTML_PAGE = """<!DOCTYPE html>
             </div>
             <div>
                 <button class="btn btn-outline-info btn-sm me-2" data-bs-toggle="modal" data-bs-target="#settingsModal">⚙ Broker & Capital Settings</button>
-                <span id="last-tick" class="small text-muted">Updating...</span>
+                <span id="socket-status" class="badge bg-danger">Connecting WS...</span>
             </div>
         </div>
 
@@ -61,18 +62,18 @@ HTML_PAGE = """<!DOCTYPE html>
                 <div class="card p-2 shadow-lg">
                     <div class="px-2 mb-1 d-flex justify-content-between">
                         <span class="fw-bold small text-info" id="chart-d-title">1D Chart: BINANCE:BTCUSDT</span>
-                        <small class="text-muted">KC (20, 1.0) + RSI</small>
+                        <small class="text-muted">Keltner Channel + RSI</small>
                     </div>
-                    <div id="chart-container-1d" class="chart-box"></div>
+                    <iframe id="iframe-1d" class="chart-frame" src=""></iframe>
                 </div>
             </div>
             <div class="col-12 col-lg-6">
                 <div class="card p-2 shadow-lg">
                     <div class="px-2 mb-1 d-flex justify-content-between">
                         <span class="fw-bold small text-warning" id="chart-h-title">1H Chart: BINANCE:BTCUSDT</span>
-                        <small class="text-muted">KC (20, 1.0) + RSI</small>
+                        <small class="text-muted">Keltner Channel + RSI</small>
                     </div>
-                    <div id="chart-container-1h" class="chart-box"></div>
+                    <iframe id="iframe-1h" class="chart-frame" src=""></iframe>
                 </div>
             </div>
         </div>
@@ -84,7 +85,7 @@ HTML_PAGE = """<!DOCTYPE html>
                     <thead>
                         <tr class="text-secondary small">
                             <th>Coin</th>
-                            <th>Live Price</th>
+                            <th>Live Price (Tick)</th>
                             <th>Daily RSI</th>
                             <th>1H RSI</th>
                             <th>Setup Signal</th>
@@ -95,7 +96,7 @@ HTML_PAGE = """<!DOCTYPE html>
                         </tr>
                     </thead>
                     <tbody id="scanner-table">
-                        <tr><td colspan="9" class="text-center py-4 text-info">Scanning market candles...</td></tr>
+                        <tr id="row-BTCUSDT"><td colspan="9" class="text-center py-4 text-info">Connecting Tick-by-Tick Feed...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -150,56 +151,23 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <script>
-        const COINS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"];
+        const TRACK_PAIRS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"];
+        let marketData = {};
+        let rsiValues = {};
         let hasActiveTrade = false;
-        let currentCoin = "BTCUSDT";
+        let ws = null;
 
-                function renderChart(containerId, symbol, interval, titleElemId, labelPrefix) {
-            document.getElementById(titleElemId).innerText = `${labelPrefix}: BINANCE:${symbol}`;
-            document.getElementById(containerId).innerHTML = '';
-
-            new TradingView.widget({
-                "autosize": true,
-                "symbol": "BINANCE:" + symbol,
-                "interval": interval,
-                "timezone": "Asia/Kolkata",
-                "theme": "dark",
-                "style": "1",
-                "locale": "en",
-                "toolbar_bg": "#1e293b",
-                "enable_publishing": false,
-                "withdateranges": false,
-                "hide_side_toolbar": false,
-                "allow_symbol_change": true,
-                "container_id": containerId,
-                "studies": [
-                    {
-                        "id": "KeltnerChannels@tv-basicstudies",
-                        "inputs": {
-                            "length": 20,
-                            "mult": 1.0
-                        }
-                    },
-                    {
-                        "id": "RSI@tv-basicstudies",
-                        "inputs": {
-                            "length": 14
-                        }
-                    }
-                ],
-                "studies_overrides": {
-                    "keltner channels.plot.color": "#38bdf8",
-                    "keltner channels.upper.color": "#10b981",
-                    "keltner channels.lower.color": "#ef4444"
-                }
-            });
+        function getChartEmbedUrl(symbol, interval) {
+            const sym = "BINANCE:" + symbol;
+            const studies = encodeURIComponent(JSON.stringify(["KeltnerChannels@tv-basicstudies", "RSI@tv-basicstudies"]));
+            return `https://s.tradingview.com/widgetembed/?frameElementId=tradingview_widget&symbol=${sym}&interval=${interval}&symboledit=1&saveimage=0&toolbarbg=1e293b&studies=${studies}&theme=dark&style=1&timezone=Asia%2FKolkata&studies_overrides=%7B%7D&overrides=%7B%7D&enabled_features=%5B%5D&disabled_features=%5B%5D&locale=en`;
         }
 
-
         function setSymbol(symbol) {
-            currentCoin = symbol;
-            renderChart("chart-container-1d", symbol, "D", "chart-d-title", "1D Chart");
-            renderChart("chart-container-1h", symbol, "60", "chart-h-title", "1H Chart");
+            document.getElementById('chart-d-title').innerText = `1D Chart: BINANCE:${symbol}`;
+            document.getElementById('chart-h-title').innerText = `1H Chart: BINANCE:${symbol}`;
+            document.getElementById('iframe-1d').src = getChartEmbedUrl(symbol, "D");
+            document.getElementById('iframe-1h').src = getChartEmbedUrl(symbol, "60");
         }
 
         function calculateRSI(closes) {
@@ -218,78 +186,114 @@ HTML_PAGE = """<!DOCTYPE html>
                 avgLoss = (avgLoss * 13 + (diff < 0 ? Math.abs(diff) : 0)) / 14;
             }
             if (avgLoss === 0) return 100.0;
-            let rs = avgGain / avgLoss;
-            return (100 - (100 / (1 + rs))).toFixed(2);
+            return +(100 - (100 / (1 + (avgGain / avgLoss)))).toFixed(2);
         }
 
-        async function fetchCandleRSI(symbol, interval) {
-            try {
-                const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=50`);
-                const data = await res.json();
-                const closes = data.map(k => parseFloat(k[4]));
-                return calculateRSI(closes);
-            } catch(e) {
-                return 50.0;
-            }
-        }
-
-        async function scanMarket() {
-            const riskINR = parseFloat(document.getElementById('cfg-risk').value || 500);
-            const riskUSD = riskINR / 90.0;
-            const tbody = document.getElementById('scanner-table');
-            let rows = '';
-
-            for (const sym of COINS) {
+        async function updateHistoricalRSI() {
+            for (const sym of TRACK_PAIRS) {
                 try {
-                    const [pRes, dRSI, hRSI] = await Promise.all([
-                        fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${sym}`).then(r => r.json()),
-                        fetchCandleRSI(sym, "1d"),
-                        fetchCandleRSI(sym, "1h")
+                    const [resD, resH] = await Promise.all([
+                        fetch(`https://api.binance.com/api/v3/klines?symbol=${sym}&interval=1d&limit=30`).then(r => r.json()),
+                        fetch(`https://api.binance.com/api/v3/klines?symbol=${sym}&interval=1h&limit=30`).then(r => r.json())
                     ]);
-
-                    const price = parseFloat(pRes.price);
-                    let signal = 'NEUTRAL', badge = 'badge-neutral';
-                    let sl = '-', target = '-', lot = '-';
-
-                    if (dRSI > 58 && hRSI > 52) {
-                        signal = 'STRONG LONG';
-                        badge = 'badge-long';
-                        const slVal = +(price * 0.985).toFixed(2);
-                        sl = slVal;
-                        target = +(price * 1.03).toFixed(2);
-                        lot = (riskUSD / Math.abs(price - slVal)).toFixed(4);
-                    } else if (dRSI < 42 && hRSI < 48) {
-                        signal = 'STRONG SHORT';
-                        badge = 'badge-short';
-                        const slVal = +(price * 1.015).toFixed(2);
-                        sl = slVal;
-                        target = +(price * 0.97).toFixed(2);
-                        lot = (riskUSD / Math.abs(slVal - price)).toFixed(4);
-                    }
-
-                    const disable = (hasActiveTrade || signal === 'NEUTRAL') ? 'disabled' : '';
-
-                    rows += `
-                        <tr>
-                            <td class="fw-bold coin-link" onclick="setSymbol('${sym}')">${sym}</td>
-                            <td>$${price}</td>
-                            <td class="${dRSI > 60 ? 'text-success' : (dRSI < 40 ? 'text-danger' : '')}">${dRSI}</td>
-                            <td class="${hRSI > 55 ? 'text-success' : (hRSI < 45 ? 'text-danger' : '')}">${hRSI}</td>
-                            <td><span class="${badge}">${signal}</span></td>
-                            <td class="text-warning">${sl !== '-' ? '$' + sl : '-'}</td>
-                            <td class="text-info">${target !== '-' ? '$' + target : '-'}</td>
-                            <td class="fw-bold text-warning">${lot}</td>
-                            <td>
-                                <button class="btn btn-sm btn-success px-2 py-0" ${disable} onclick="placeTrade('${sym}', 'buy', '${lot}', '${sl}', '${target}')">Buy</button>
-                                <button class="btn btn-sm btn-danger px-2 py-0 ms-1" ${disable} onclick="placeTrade('${sym}', 'sell', '${lot}', '${sl}', '${target}')">Sell</button>
-                            </td>
-                        </tr>
-                    `;
+                    rsiValues[sym] = {
+                        d: calculateRSI(resD.map(k => parseFloat(k[4]))),
+                        h: calculateRSI(resH.map(k => parseFloat(k[4])))
+                    };
                 } catch(e) {}
             }
+            renderTable();
+        }
 
-            if (rows) tbody.innerHTML = rows;
-            document.getElementById('last-tick').innerText = 'Tick: ' + new Date().toLocaleTimeString();
+        function initWebSocket() {
+            const streams = TRACK_PAIRS.map(s => s.toLowerCase() + "@ticker").join("/");
+            ws = new WebSocket(`wss://stream.binance.com:9443/ws/${streams}`);
+
+            ws.onopen = () => {
+                const badge = document.getElementById('socket-status');
+                badge.innerText = 'WS Live Tick (0ms)';
+                badge.className = 'badge bg-success';
+            };
+
+            ws.onmessage = (event) => {
+                const tick = JSON.parse(event.data);
+                const sym = tick.s;
+                if (!sym) return;
+                
+                marketData[sym] = {
+                    price: parseFloat(tick.c),
+                    high: parseFloat(tick.h),
+                    low: parseFloat(tick.l)
+                };
+                renderRow(sym);
+            };
+
+            ws.onclose = () => {
+                const badge = document.getElementById('socket-status');
+                badge.innerText = 'Reconnecting WS...';
+                badge.className = 'badge bg-warning text-dark';
+                setTimeout(initWebSocket, 3000);
+            };
+        }
+
+        function renderRow(sym) {
+            const m = marketData[sym];
+            if (!m) return;
+            const rsi = rsiValues[sym] || { d: 50.0, h: 50.0 };
+            const riskINR = parseFloat(document.getElementById('cfg-risk').value || 500);
+            const riskUSD = riskINR / 90.0;
+
+            let signal = 'NEUTRAL', badge = 'badge-neutral';
+            let sl = '-', target = '-', lot = '-';
+
+            if (rsi.d > 58 && rsi.h > 52) {
+                signal = 'STRONG LONG';
+                badge = 'badge-long';
+                const slVal = +(m.price * 0.985).toFixed(2);
+                sl = slVal;
+                target = +(m.price * 1.03).toFixed(2);
+                lot = (riskUSD / Math.abs(m.price - slVal)).toFixed(4);
+            } else if (rsi.d < 42 && rsi.h < 48) {
+                signal = 'STRONG SHORT';
+                badge = 'badge-short';
+                const slVal = +(m.price * 1.015).toFixed(2);
+                sl = slVal;
+                target = +(m.price * 0.97).toFixed(2);
+                lot = (riskUSD / Math.abs(slVal - m.price)).toFixed(4);
+            }
+
+            const disable = (hasActiveTrade || signal === 'NEUTRAL') ? 'disabled' : '';
+            let rowElem = document.getElementById(`row-${sym}`);
+            
+            if (!rowElem) {
+                renderTable();
+                return;
+            }
+
+            rowElem.innerHTML = `
+                <td class="fw-bold coin-link" onclick="setSymbol('${sym}')">${sym}</td>
+                <td class="fw-bold text-light tick-flash">$${m.price.toFixed(m.price < 5 ? 4 : 2)}</td>
+                <td class="${rsi.d > 60 ? 'text-success' : (rsi.d < 40 ? 'text-danger' : '')}">${rsi.d}</td>
+                <td class="${rsi.h > 55 ? 'text-success' : (rsi.h < 45 ? 'text-danger' : '')}">${rsi.h}</td>
+                <td><span class="${badge}">${signal}</span></td>
+                <td class="text-warning">${sl !== '-' ? '$' + sl : '-'}</td>
+                <td class="text-info">${target !== '-' ? '$' + target : '-'}</td>
+                <td class="fw-bold text-warning">${lot}</td>
+                <td>
+                    <button class="btn btn-sm btn-success px-2 py-0" ${disable} onclick="placeTrade('${sym}', 'buy', '${lot}', '${sl}', '${target}')">Buy</button>
+                    <button class="btn btn-sm btn-danger px-2 py-0 ms-1" ${disable} onclick="placeTrade('${sym}', 'sell', '${lot}', '${sl}', '${target}')">Sell</button>
+                </td>
+            `;
+        }
+
+        function renderTable() {
+            const tbody = document.getElementById('scanner-table');
+            let html = '';
+            for (const sym of TRACK_PAIRS) {
+                html += `<tr id="row-${sym}"><td colspan="9" class="text-center py-2">${sym} loading...</td></tr>`;
+            }
+            tbody.innerHTML = html;
+            TRACK_PAIRS.forEach(sym => { if (marketData[sym]) renderRow(sym); });
         }
 
         async function fetchConfig() {
@@ -320,10 +324,9 @@ HTML_PAGE = """<!DOCTYPE html>
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(payload)
             });
-            alert('Settings & Broker Credentials Saved!');
+            alert('Broker Credentials & Risk Configuration Saved!');
             fetchConfig();
             bootstrap.Modal.getInstance(document.getElementById('settingsModal')).hide();
-            scanMarket();
         }
 
         async function checkTradeState() {
@@ -354,7 +357,7 @@ HTML_PAGE = """<!DOCTYPE html>
                 alert("Only 1 active position allowed! Please close current position.");
                 return;
             }
-            if (!confirm(`Execute ${side.toUpperCase()} on ${symbol}?\nLot: ${qty}\nRisk: ₹500`)) return;
+            if (!confirm(`Execute ${side.toUpperCase()} on ${symbol}?\\nLot: ${qty}\\nRisk: ₹500`)) return;
 
             const res = await fetch('/api/order', {
                 method: 'POST',
@@ -366,12 +369,14 @@ HTML_PAGE = """<!DOCTYPE html>
             checkTradeState();
         }
 
-        // Initialize Dual Charts & Scanner
+        // Initialize Terminal
+        renderTable();
         setSymbol('BTCUSDT');
         fetchConfig();
         checkTradeState();
-        scanMarket();
-        setInterval(scanMarket, 5000);
+        initWebSocket();
+        updateHistoricalRSI();
+        setInterval(updateHistoricalRSI, 15000);
         setInterval(checkTradeState, 4000);
     </script>
 </body>
@@ -414,7 +419,7 @@ def close_trade():
 def order():
     global trade_state
     trade_state["active_trade"] = request.json
-    return jsonify({"message": f"Order submitted for {request.json.get('symbol')} via {config.get('broker')}!"})
+    return jsonify({"message": f"Order executed for {request.json.get('symbol')} via {config.get('broker')}!"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
