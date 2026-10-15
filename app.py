@@ -51,7 +51,7 @@ def load_config():
         "leverage": 5,
         "kc_length": 20,
         "kc_mult": 1.0,
-        "layout": "pro"  # 'classic' or 'pro'
+        "layout": "pro"
     }
 
 def save_config(data):
@@ -301,7 +301,6 @@ HTML_TEMPLATE = """
 </head>
 <body class="p-1">
     <div class="container-fluid">
-        <!-- TOP NAVBAR -->
         <div class="terminal-card p-2 px-3 mb-1 d-flex flex-wrap justify-content-between align-items-center">
             <div class="d-flex align-items-center gap-3">
                 <h6 class="fw-bold text-info mb-0"><span class="live-dot me-2"></span>SPIDER PRO TERMINAL</h6>
@@ -323,7 +322,6 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- ACTIVE TRADE BANNER -->
         <div id="active-trade-container" class="mb-1 d-none">
             <div class="p-1 px-3 rounded d-flex justify-content-between align-items-center" style="background: rgba(16,185,129,0.15); border: 1px solid #10b981;">
                 <div><span class="badge bg-success me-2">LIVE POSITION</span><span class="fw-bold text-white small" id="at-details">...</span></div>
@@ -331,11 +329,8 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- LAYOUT CONTAINER (PRO SPIDER STYLE VS CLASSIC) -->
         <div id="layout-wrapper">
-            <!-- PRO MULTI-WINDOW LAYOUT (Spider Style) -->
             <div id="pro-layout" class="row g-1">
-                <!-- Left/Middle: Live Chart -->
                 <div class="col-lg-6 col-xl-7">
                     <div class="terminal-card p-2 mb-1">
                         <div class="d-flex justify-content-between align-items-center px-1 mb-1">
@@ -352,14 +347,12 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
 
-                <!-- Right Side Windows: Live Scanner & Market Watch -->
                 <div class="col-lg-6 col-xl-5">
                     <div class="d-flex flex-column gap-1">
-                        <!-- Live Scanner Window -->
                         <div class="terminal-card p-2">
                             <div class="d-flex justify-content-between align-items-center border-bottom border-secondary pb-1 mb-1">
                                 <span class="fw-bold text-info" style="font-size:11px;">🔍 LIVE SCANNER (Multi-Window)</span>
-                                <span class="badge bg-dark" id="scanner-count">15 Assets</span>
+                                <span class="badge bg-dark" id="scanner-count">16 Assets</span>
                             </div>
                             <div class="table-responsive" style="max-height: 250px; overflow-y: auto;">
                                 <table class="table table-dark table-hover align-middle mb-0 mini-table">
@@ -379,7 +372,6 @@ HTML_TEMPLATE = """
                             </div>
                         </div>
 
-                        <!-- Money Manager & Execution Dock -->
                         <div class="terminal-card p-2">
                             <div class="d-flex justify-content-between align-items-center border-bottom border-secondary pb-1 mb-1">
                                 <span class="fw-bold text-warning" style="font-size:11px;" id="dock-symbol">BTCUSD.P</span>
@@ -399,7 +391,6 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <!-- FULL SCANNER TABLE (Shared Bottom for both layouts) -->
             <div class="terminal-card p-2 mt-1">
                 <div class="d-flex justify-content-between align-items-center px-1 mb-1">
                     <span class="fw-bold text-info" style="font-size:11px;">📋 FULL MARKET WATCH & EXECUTION TABLE</span>
@@ -432,7 +423,6 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- SETTINGS & BOT MODALS -->
     <div class="modal fade" id="botModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header border-secondary"><h6 class="modal-title fw-bold text-info">🤖 Telegram Bot Settings</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-2"><label class="form-label small text-info">Bot Token</label><input type="text" class="form-control" id="cfg-tg-token"></div><div class="mb-2"><label class="form-label small text-info">Chat ID</label><input type="text" class="form-control" id="cfg-tg-chat"></div></div><div class="modal-footer border-secondary"><button type="button" class="btn btn-primary w-100 fw-bold" onclick="saveBotSettings()">Save Bot</button></div></div></div></div>
     
     <div class="modal fade" id="settingsModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header border-secondary"><h6 class="modal-title fw-bold text-info">⚙ KC & Terminal Setup</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="row g-2 mb-2"><div class="col-6"><label class="form-label small">KC Length</label><input type="number" class="form-control" id="cfg-kcl" value="20"></div><div class="col-6"><label class="form-label small">KC Multiplier</label><input type="number" step="0.1" class="form-control" id="cfg-kcm" value="1.0"></div><div class="col-6"><label class="form-label small">Capital (₹)</label><input type="number" class="form-control" id="cfg-capital" value="10000"></div><div class="col-6"><label class="form-label small">Risk (₹)</label><input type="number" class="form-control" id="cfg-risk" value="500"></div><div class="col-6"><label class="form-label small">Leverage (Min 5x)</label><input type="number" class="form-control" id="cfg-lev" value="5"></div><div class="col-6"><label class="form-label small">Risk:Reward</label><select class="form-select" id="cfg-rr"><option value="2.0">1 : 2</option><option value="3.0">1 : 3</option></select></div></div><div class="mb-2"><label class="form-label small">Delta API Key</label><input type="text" class="form-control" id="cfg-api-key"></div><div class="mb-2"><label class="form-label small">Delta API Secret</label><input type="password" class="form-control" id="cfg-api-secret"></div></div><div class="modal-footer border-secondary"><button type="button" class="btn btn-info w-100 fw-bold" onclick="saveSettings()">Save Settings</button></div></div></div></div>
