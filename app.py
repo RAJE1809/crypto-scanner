@@ -14,7 +14,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "broker_config.json")
 STATE_FILE = os.path.join(BASE_DIR, "trade_state.json")
 
-# Expanded Futures & Commodities Watchlist
 FUTURES_WATCHLIST = [
     'BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'BNBUSD',
     'DOGEUSD', 'SUIUSD', 'LINKUSD', 'AVAXUSD', 'NEARUSD',
@@ -49,7 +48,10 @@ def load_config():
         "capital_inr": 10000,
         "max_risk_inr": 500,
         "rr_ratio": 2.0,
-        "leverage": 5
+        "leverage": 5,
+        "kc_length": 20,
+        "kc_mult": 1.0,
+        "layout": "pro"  # 'classic' or 'pro'
     }
 
 def save_config(data):
@@ -156,7 +158,7 @@ def calculate_keltner_series(closes, highs, lows, length=20, mult=1.0):
         lower.append(ema[i] - (mult * atr))
     return upper, ema, lower
 
-def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage):
+def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
     htf_tf = '1d' if mode == 'swing' else '1h'
     ltf_tf = '1h' if mode == 'swing' else '15m'
 
@@ -175,10 +177,10 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage):
     l_vol = [float(k.get('volume', 0)) for k in ltf_raw]
 
     htf_rsi = calculate_rsi_series(h_close, 14)[-1]
-    htf_kcu, _, htf_kcl = calculate_keltner_series(h_close, h_high, h_low, 20, 1.0)
+    htf_kcu, _, htf_kcl = calculate_keltner_series(h_close, h_high, h_low, kc_len, kc_m)
 
     ltf_rsi = calculate_rsi_series(l_close, 14)[-1]
-    ltf_kcu, _, ltf_kcl = calculate_keltner_series(l_close, l_high, l_low, 20, 1.0)
+    ltf_kcu, _, ltf_kcl = calculate_keltner_series(l_close, l_high, l_low, kc_len, kc_m)
 
     curr_price = l_close[-1]
     recent_vol = round(sum(l_vol[-5:]), 1)
@@ -271,180 +273,169 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pro Delta Futures Terminal | Auto Trade & P&L</title>
+    <title>Pro Multi-Window Trading Terminal</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
     <style>
-        :root { --bg-dark: #060911; --panel-bg: #111827; --border-col: #1f2937; --accent: #38bdf8; }
-        body { background-color: var(--bg-dark); color: #f3f4f6; font-family: 'Inter', system-ui, sans-serif; font-size: 13px; }
-        .terminal-card { background-color: var(--panel-bg); border: 1px solid var(--border-col); border-radius: 8px; }
+        :root { --bg-dark: #05070d; --panel-bg: #0f172a; --border-col: #1e293b; --accent: #38bdf8; }
+        body { background-color: var(--bg-dark); color: #f1f5f9; font-family: 'Inter', system-ui, sans-serif; font-size: 12px; }
+        .terminal-card { background-color: var(--panel-bg); border: 1px solid var(--border-col); border-radius: 6px; }
         .table-dark { background-color: var(--panel-bg); --bs-table-bg: var(--panel-bg); }
-        .badge-long { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #10b981; padding: 4px 8px; border-radius: 4px; font-weight: 700; }
-        .badge-short { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; padding: 4px 8px; border-radius: 4px; font-weight: 700; }
-        .badge-neutral { background: #1f2937; color: #9ca3af; padding: 4px 8px; border-radius: 4px; }
+        .badge-long { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #10b981; padding: 2px 6px; border-radius: 4px; font-weight: 700; }
+        .badge-short { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; padding: 2px 6px; border-radius: 4px; font-weight: 700; }
+        .badge-neutral { background: #1f2937; color: #9ca3af; padding: 2px 6px; border-radius: 4px; }
         .coin-selector { cursor: pointer; color: var(--accent); font-weight: 700; }
         .coin-selector:hover { text-decoration: underline; }
-        #price-chart { height: 320px; width: 100%; }
+        #price-chart { height: 380px; width: 100%; }
         #rsi-chart { height: 110px; width: 100%; border-top: 1px solid var(--border-col); }
-        .stat-box { background: #0b1120; border: 1px solid #1e293b; border-radius: 6px; padding: 6px 10px; }
-        .live-dot { height: 8px; width: 8px; background-color: #10b981; border-radius: 50%; display: inline-block; animation: pulse 1.2s infinite; }
+        .stat-box { background: #070b14; border: 1px solid #1e293b; border-radius: 5px; padding: 5px 8px; }
+        .live-dot { height: 7px; width: 7px; background-color: #10b981; border-radius: 50%; display: inline-block; animation: pulse 1.2s infinite; }
         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.2; } 100% { opacity: 1; } }
         .mode-btn.active { background-color: #0284c7 !important; color: #fff !important; border-color: #38bdf8 !important; font-weight: bold; }
-        .modal-content { background-color: var(--panel-bg); color: #fff; border: 1px solid #374151; }
-        .form-control, .form-select { background-color: #070b14; border: 1px solid #374151; color: #fff; font-size: 13px; }
+        .modal-content { background-color: var(--panel-bg); color: #fff; border: 1px solid #334155; }
+        .form-control, .form-select { background-color: #070b14; border: 1px solid #334155; color: #fff; font-size: 12px; }
+        .mini-table { font-size: 11px; }
+        .mini-table th, .mini-table td { padding: 4px 6px; }
     </style>
 </head>
-<body class="p-2">
+<body class="p-1">
     <div class="container-fluid">
-        <div class="terminal-card p-2 px-3 mb-2 d-flex flex-wrap justify-content-between align-items-center">
+        <!-- TOP NAVBAR -->
+        <div class="terminal-card p-2 px-3 mb-1 d-flex flex-wrap justify-content-between align-items-center">
             <div class="d-flex align-items-center gap-3">
-                <h5 class="fw-bold text-info mb-0"><span class="live-dot me-2"></span>DELTA AUTO-TRADING TERMINAL</h5>
+                <h6 class="fw-bold text-info mb-0"><span class="live-dot me-2"></span>SPIDER PRO TERMINAL</h6>
                 <div class="btn-group btn-group-sm" role="group">
-                    <button type="button" class="btn btn-outline-info mode-btn active" id="mode-swing" onclick="switchMode('swing')">📈 SWING (1D+1H)</button>
-                    <button type="button" class="btn btn-outline-info mode-btn" id="mode-intraday" onclick="switchMode('intraday')">⚡ INTRADAY (1H+15m)</button>
+                    <button type="button" class="btn btn-outline-info mode-btn active py-0" id="mode-swing" onclick="switchMode('swing')">Swing (1D+1H)</button>
+                    <button type="button" class="btn btn-outline-info mode-btn py-0" id="mode-intraday" onclick="switchMode('intraday')">Intraday (1H+15m)</button>
                 </div>
             </div>
-            <div class="d-flex align-items-center gap-2 mt-2 mt-md-0">
-                <span class="badge bg-dark border border-secondary text-warning" id="auto-trade-badge">🤖 Auto-Trade: OFF</span>
-                <button class="btn btn-outline-warning btn-sm py-1" onclick="toggleAutoTrade()" id="auto-trade-toggle-btn">Enable Auto-Trade</button>
-                <button class="btn btn-info btn-sm py-1 fw-bold" data-bs-toggle="modal" data-bs-target="#settingsModal">⚙ Complete Terminal Setup</button>
+            <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-dark border border-secondary text-warning" id="auto-trade-badge">Auto: OFF</span>
+                <button class="btn btn-outline-warning btn-sm py-0 px-2" onclick="toggleAutoTrade()" id="auto-trade-toggle-btn">Auto Trade</button>
+                <div class="btn-group btn-group-sm">
+                    <button class="btn btn-secondary py-0" onclick="setLayout('pro')">🖥 Pro Layout</button>
+                    <button class="btn btn-outline-secondary py-0 text-white" onclick="setLayout('classic')">📱 Classic</button>
+                </div>
+                <button class="btn btn-primary btn-sm py-0 px-2 fw-bold" data-bs-toggle="modal" data-bs-target="#botModal">🤖 Bot</button>
+                <button class="btn btn-info btn-sm py-0 px-2 fw-bold" data-bs-toggle="modal" data-bs-target="#settingsModal">⚙ Setup</button>
                 <span id="last-tick" class="text-secondary small">Live</span>
             </div>
         </div>
 
-        <div id="active-trade-container" class="mb-2 d-none">
-            <div class="p-2 px-3 rounded d-flex justify-content-between align-items-center" style="background: rgba(16,185,129,0.15); border: 1px solid #10b981;">
-                <div>
-                    <span class="badge bg-success me-2">LIVE POSITION OPEN</span>
-                    <span class="fw-bold text-white" id="at-details">Loading...</span>
-                </div>
-                <div>
-                    <span class="fw-bold fs-6 me-3" id="live-pnl-display">P&L: $0.00 (₹0)</span>
-                    <button class="btn btn-sm btn-danger fw-bold py-0" onclick="closeActiveTrade()">Manual Exit Position</button>
-                </div>
+        <!-- ACTIVE TRADE BANNER -->
+        <div id="active-trade-container" class="mb-1 d-none">
+            <div class="p-1 px-3 rounded d-flex justify-content-between align-items-center" style="background: rgba(16,185,129,0.15); border: 1px solid #10b981;">
+                <div><span class="badge bg-success me-2">LIVE POSITION</span><span class="fw-bold text-white small" id="at-details">...</span></div>
+                <div><span class="fw-bold me-3 text-success" id="live-pnl-display">P&L: $0.00</span><button class="btn btn-sm btn-danger fw-bold py-0 px-2" style="font-size:11px;" onclick="closeActiveTrade()">Exit</button></div>
             </div>
         </div>
 
-        <div class="row g-2 mb-2">
-            <div class="col-lg-8">
-                <div class="terminal-card p-2 h-100">
-                    <div class="d-flex flex-wrap justify-content-between align-items-center px-2 mb-2">
-                        <div class="d-flex align-items-center gap-2">
-                            <span class="fs-6 fw-bold text-warning" id="chart-title">BTCUSD.P (1H)</span>
-                            <span class="badge" style="background:#0284c7;">KC Bands (20, 1.0)</span>
-                            <span class="badge" style="background:#7c3aed;">RSI 14</span>
+        <!-- LAYOUT CONTAINER (PRO SPIDER STYLE VS CLASSIC) -->
+        <div id="layout-wrapper">
+            <!-- PRO MULTI-WINDOW LAYOUT (Spider Style) -->
+            <div id="pro-layout" class="row g-1">
+                <!-- Left/Middle: Live Chart -->
+                <div class="col-lg-6 col-xl-7">
+                    <div class="terminal-card p-2 mb-1">
+                        <div class="d-flex justify-content-between align-items-center px-1 mb-1">
+                            <span class="fw-bold text-warning" id="chart-title">BTCUSD.P (1H)</span>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-info py-0 px-1" onclick="switchTF('15m')">15m</button>
+                                <button class="btn btn-outline-info active py-0 px-1" onclick="switchTF('1h')">1H</button>
+                                <button class="btn btn-outline-info py-0 px-1" onclick="switchTF('4h')">4H</button>
+                                <button class="btn btn-outline-info py-0 px-1" onclick="switchTF('1d')">1D</button>
+                            </div>
                         </div>
-                        <div class="btn-group btn-group-sm">
-                            <button class="btn btn-outline-info py-0" id="btn-15m" onclick="switchTF('15m')">15m</button>
-                            <button class="btn btn-outline-info active py-0" id="btn-1h" onclick="switchTF('1h')">1H</button>
-                            <button class="btn btn-outline-info py-0" id="btn-4h" onclick="switchTF('4h')">4H</button>
-                            <button class="btn btn-outline-info py-0" id="btn-1d" onclick="switchTF('1d')">1D</button>
+                        <div id="price-chart"></div>
+                        <div id="rsi-chart"></div>
+                    </div>
+                </div>
+
+                <!-- Right Side Windows: Live Scanner & Market Watch -->
+                <div class="col-lg-6 col-xl-5">
+                    <div class="d-flex flex-column gap-1">
+                        <!-- Live Scanner Window -->
+                        <div class="terminal-card p-2">
+                            <div class="d-flex justify-content-between align-items-center border-bottom border-secondary pb-1 mb-1">
+                                <span class="fw-bold text-info" style="font-size:11px;">🔍 LIVE SCANNER (Multi-Window)</span>
+                                <span class="badge bg-dark" id="scanner-count">15 Assets</span>
+                            </div>
+                            <div class="table-responsive" style="max-height: 250px; overflow-y: auto;">
+                                <table class="table table-dark table-hover align-middle mb-0 mini-table">
+                                    <thead>
+                                        <tr class="text-secondary">
+                                            <th>Symbol</th>
+                                            <th>Price</th>
+                                            <th>Signal</th>
+                                            <th>Lot</th>
+                                            <th>Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="pro-scanner-tbody">
+                                        <tr><td colspan="5" class="text-center text-info">Loading...</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- Money Manager & Execution Dock -->
+                        <div class="terminal-card p-2">
+                            <div class="d-flex justify-content-between align-items-center border-bottom border-secondary pb-1 mb-1">
+                                <span class="fw-bold text-warning" style="font-size:11px;" id="dock-symbol">BTCUSD.P</span>
+                                <span class="badge" style="background:#0284c7;" id="dock-signal-badge">SIGNAL: NEUTRAL</span>
+                            </div>
+                            <div class="row g-1 mb-1">
+                                <div class="col-4"><div class="stat-box"><div class="text-secondary" style="font-size:10px;">Capital</div><div class="fw-bold text-white" id="lbl-capital">₹10k</div></div></div>
+                                <div class="col-4"><div class="stat-box"><div class="text-secondary" style="font-size:10px;">Risk/Trade</div><div class="fw-bold text-danger" id="lbl-risk">₹500</div></div></div>
+                                <div class="col-4"><div class="stat-box"><div class="text-secondary" style="font-size:10px;">Auto Lot</div><div class="fw-bold text-warning" id="dock-lot">0.00</div></div></div>
+                            </div>
+                            <div class="row g-1">
+                                <div class="col-6"><button class="btn btn-success w-100 fw-bold py-1" style="font-size:11px;" onclick="executeDockOrder('buy')">▲ LONG</button></div>
+                                <div class="col-6"><button class="btn btn-danger w-100 fw-bold py-1" style="font-size:11px;" onclick="executeDockOrder('sell')">▼ SHORT</button></div>
+                            </div>
                         </div>
                     </div>
-                    <div id="price-chart"></div>
-                    <div id="rsi-chart"></div>
                 </div>
             </div>
 
-            <div class="col-lg-4">
-                <div class="terminal-card p-3 h-100 d-flex flex-column justify-content-between">
-                    <div>
-                        <div class="d-flex justify-content-between align-items-center border-bottom border-secondary pb-2 mb-2">
-                            <h6 class="fw-bold text-info mb-0">📊 RISK & LEVERAGE CONTROL</h6>
-                            <span class="badge bg-warning text-dark fw-bold" id="dock-symbol">BTCUSD.P</span>
-                        </div>
-                        <div class="row g-2 mb-2">
-                            <div class="col-6"><div class="stat-box"><div class="text-secondary small">Capital</div><div class="fw-bold fs-6" id="lbl-capital">₹10,000</div></div></div>
-                            <div class="col-6"><div class="stat-box"><div class="text-secondary small">Fixed Risk</div><div class="fw-bold fs-6 text-danger" id="lbl-risk">₹500</div></div></div>
-                            <div class="col-6"><div class="stat-box"><div class="text-secondary small">Leverage</div><div class="fw-bold fs-6 text-warning" id="lbl-lev">5x Min</div></div></div>
-                            <div class="col-6"><div class="stat-box"><div class="text-secondary small">Target Profit</div><div class="fw-bold fs-6 text-success" id="lbl-profit">+₹1,000</div></div></div>
-                        </div>
-                        <div class="p-2 rounded mb-2" style="background:#0b1120; border:1px solid #1e293b;">
-                            <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Live Price:</span><span class="fw-bold text-info" id="dock-price">$0.00</span></div>
-                            <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Auto Stop Loss:</span><span class="fw-bold text-danger" id="dock-sl">$0.00</span></div>
-                            <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Auto Target (1:2):</span><span class="fw-bold text-success" id="dock-tp">$0.00</span></div>
-                            <hr class="my-1 border-secondary">
-                            <div class="d-flex justify-content-between mb-1"><span class="text-warning fw-bold">Auto Lot Size:</span><span class="fw-bold fs-6 text-warning" id="dock-lot">0.000</span></div>
-                            <div class="d-flex justify-content-between"><span class="text-secondary small">Est. Margin:</span><span class="text-white small fw-bold" id="dock-margin">₹0</span></div>
-                        </div>
-                    </div>
-                    <div>
-                        <div class="mb-2 text-center"><span id="dock-signal-badge" class="badge-neutral d-block py-2">SIGNAL: NEUTRAL</span></div>
-                        <div class="row g-2">
-                            <div class="col-6"><button class="btn btn-success w-100 fw-bold py-2" id="dock-buy-btn" onclick="executeDockOrder('buy')">▲ LONG</button></div>
-                            <div class="col-6"><button class="btn btn-danger w-100 fw-bold py-2" id="dock-sell-btn" onclick="executeDockOrder('sell')">▼ SHORT</button></div>
-                        </div>
-                    </div>
+            <!-- FULL SCANNER TABLE (Shared Bottom for both layouts) -->
+            <div class="terminal-card p-2 mt-1">
+                <div class="d-flex justify-content-between align-items-center px-1 mb-1">
+                    <span class="fw-bold text-info" style="font-size:11px;">📋 FULL MARKET WATCH & EXECUTION TABLE</span>
+                    <span class="small text-secondary">Click any symbol to load chart</span>
                 </div>
-            </div>
-        </div>
-
-        <div class="terminal-card p-2">
-            <div class="d-flex justify-content-between align-items-center px-2 mb-2">
-                <span class="fw-bold text-info" id="scanner-header-title">📈 FUTURES & COMMODITIES SCANNER</span>
-                <span class="small text-secondary">Auto Telegram Alerts & One-Click Execution</span>
-            </div>
-            <div class="table-responsive">
-                <table class="table table-dark table-hover align-middle mb-0">
-                    <thead>
-                        <tr class="text-secondary small">
-                            <th>Contract</th>
-                            <th>Price</th>
-                            <th id="th-htf-rsi">HTF RSI</th>
-                            <th id="th-ltf-rsi">LTF RSI</th>
-                            <th>KC Bands (Lower / Upper)</th>
-                            <th>Vol</th>
-                            <th>Signal</th>
-                            <th>Buffer SL</th>
-                            <th>Target</th>
-                            <th class="text-warning">Lot Size</th>
-                            <th>Margin</th>
-                            <th>Execute</th>
-                        </tr>
-                    </thead>
-                    <tbody id="scanner-table">
-                        <tr><td colspan="12" class="text-center py-4 text-info">Scanning markets...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-
-    <!-- SETTINGS MODAL WITH ALL CONTROLS -->
-    <div class="modal fade" id="settingsModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header border-secondary">
-                    <h6 class="modal-title fw-bold text-info">⚙ Complete Terminal Setup</h6>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="row g-2 mb-3">
-                        <div class="col-6"><label class="form-label small">Capital (₹)</label><input type="number" class="form-control" id="cfg-capital" value="10000"></div>
-                        <div class="col-6"><label class="form-label small">Fixed Risk (₹)</label><input type="number" class="form-control" id="cfg-risk" value="500"></div>
-                        <div class="col-6">
-                            <label class="form-label small">Leverage (Min 5x or Manual)</label>
-                            <input type="number" class="form-control" id="cfg-lev" value="5" min="5" max="50">
-                        </div>
-                        <div class="col-6">
-                            <label class="form-label small">Risk:Reward</label>
-                            <select class="form-select" id="cfg-rr"><option value="2.0">1 : 2</option><option value="3.0">1 : 3</option></select>
-                        </div>
-                    </div>
-                    <hr class="border-secondary">
-                    <div class="mb-2"><label class="form-label small text-info">Telegram Bot Token</label><input type="text" class="form-control" id="cfg-tg-token" placeholder="8847204764:AAEopmSPVSus..."></div>
-                    <div class="mb-2"><label class="form-label small text-info">Telegram Chat ID</label><input type="text" class="form-control" id="cfg-tg-chat" placeholder="Your Chat ID"></div>
-                    <hr class="border-secondary">
-                    <div class="mb-2"><label class="form-label small">Delta API Key</label><input type="text" class="form-control" id="cfg-api-key"></div>
-                    <div class="mb-2"><label class="form-label small">Delta API Secret</label><input type="password" class="form-control" id="cfg-api-secret"></div>
-                </div>
-                <div class="modal-footer border-secondary">
-                    <button type="button" class="btn btn-info w-100 fw-bold" onclick="saveSettings()">Save All Settings</button>
+                <div class="table-responsive" style="max-height: 220px; overflow-y: auto;">
+                    <table class="table table-dark table-hover align-middle mb-0 mini-table">
+                        <thead>
+                            <tr class="text-secondary">
+                                <th>Contract</th>
+                                <th>Price</th>
+                                <th>HTF RSI</th>
+                                <th>LTF RSI</th>
+                                <th>KC (Low / Up)</th>
+                                <th>Vol</th>
+                                <th>Signal</th>
+                                <th>Buffer SL</th>
+                                <th>Target</th>
+                                <th class="text-warning">Lot Size</th>
+                                <th>Margin</th>
+                                <th>Execute</th>
+                            </tr>
+                        </thead>
+                        <tbody id="scanner-table">
+                            <tr><td colspan="12" class="text-center py-2 text-info">Scanning...</td></tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
     </div>
+
+    <!-- SETTINGS & BOT MODALS -->
+    <div class="modal fade" id="botModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header border-secondary"><h6 class="modal-title fw-bold text-info">🤖 Telegram Bot Settings</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-2"><label class="form-label small text-info">Bot Token</label><input type="text" class="form-control" id="cfg-tg-token"></div><div class="mb-2"><label class="form-label small text-info">Chat ID</label><input type="text" class="form-control" id="cfg-tg-chat"></div></div><div class="modal-footer border-secondary"><button type="button" class="btn btn-primary w-100 fw-bold" onclick="saveBotSettings()">Save Bot</button></div></div></div></div>
+    
+    <div class="modal fade" id="settingsModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header border-secondary"><h6 class="modal-title fw-bold text-info">⚙ KC & Terminal Setup</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="row g-2 mb-2"><div class="col-6"><label class="form-label small">KC Length</label><input type="number" class="form-control" id="cfg-kcl" value="20"></div><div class="col-6"><label class="form-label small">KC Multiplier</label><input type="number" step="0.1" class="form-control" id="cfg-kcm" value="1.0"></div><div class="col-6"><label class="form-label small">Capital (₹)</label><input type="number" class="form-control" id="cfg-capital" value="10000"></div><div class="col-6"><label class="form-label small">Risk (₹)</label><input type="number" class="form-control" id="cfg-risk" value="500"></div><div class="col-6"><label class="form-label small">Leverage (Min 5x)</label><input type="number" class="form-control" id="cfg-lev" value="5"></div><div class="col-6"><label class="form-label small">Risk:Reward</label><select class="form-select" id="cfg-rr"><option value="2.0">1 : 2</option><option value="3.0">1 : 3</option></select></div></div><div class="mb-2"><label class="form-label small">Delta API Key</label><input type="text" class="form-control" id="cfg-api-key"></div><div class="mb-2"><label class="form-label small">Delta API Secret</label><input type="password" class="form-control" id="cfg-api-secret"></div></div><div class="modal-footer border-secondary"><button type="button" class="btn btn-info w-100 fw-bold" onclick="saveSettings()">Save Settings</button></div></div></div></div>
 
     <script>
         let currentSymbol = 'BTCUSD';
@@ -453,30 +444,39 @@ HTML_TEMPLATE = """
         let hasActiveTrade = false;
         let autoTradeEnabled = false;
         let latestScanMap = {};
-        let priceChart, candleSeries, kcUpperSeries, kcMidSeries, kcLowerSeries;
-        let rsiChart, rsiSeries;
+        let priceChart, candleSeries, kcUpperSeries, kcMidSeries, kcLowerSeries, rsiChart, rsiSeries;
 
         function initCharts() {
             priceChart = LightweightCharts.createChart(document.getElementById('price-chart'), {
-                layout: { background: { color: '#060911' }, textColor: '#9ca3af' },
-                grid: { vertLines: { color: '#111827' }, horzLines: { color: '#111827' } },
-                timeScale: { timeVisible: true, borderColor: '#1f2937' },
-                rightPriceScale: { borderColor: '#1f2937' }
+                layout: { background: { color: '#0f172a' }, textColor: '#9ca3af' },
+                grid: { vertLines: { color: '#1e293b' }, horzLines: { color: '#1e293b' } },
+                timeScale: { timeVisible: true, borderColor: '#334155' }
             });
-            candleSeries = priceChart.addCandlestickSeries({ upColor: '#10b981', downColor: '#ef4444', borderVisible: false, wickUpColor: '#10b981', wickDownColor: '#ef4444' });
+            candleSeries = priceChart.addCandlestickSeries({ upColor: '#10b981', downColor: '#ef4444', borderVisible: false });
             kcUpperSeries = priceChart.addLineSeries({ color: '#00f2fe', lineWidth: 2 });
             kcMidSeries = priceChart.addLineSeries({ color: '#f59e0b', lineWidth: 1, lineStyle: 2 });
             kcLowerSeries = priceChart.addLineSeries({ color: '#00f2fe', lineWidth: 2 });
 
             rsiChart = LightweightCharts.createChart(document.getElementById('rsi-chart'), {
-                layout: { background: { color: '#060911' }, textColor: '#9ca3af' },
-                grid: { vertLines: { color: '#111827' }, horzLines: { color: '#111827' } },
-                timeScale: { visible: false },
-                rightPriceScale: { borderColor: '#1f2937' }
+                layout: { background: { color: '#0f172a' }, textColor: '#9ca3af' },
+                grid: { vertLines: { color: '#1e293b' }, horzLines: { color: '#1e293b' } },
+                timeScale: { visible: false }
             });
             rsiSeries = rsiChart.addLineSeries({ color: '#a855f7', lineWidth: 2 });
-            rsiSeries.createPriceLine({ price: 60.5, color: '#10b981', lineWidth: 1, lineStyle: 2, title: 'Long >60.5' });
-            rsiSeries.createPriceLine({ price: 40.5, color: '#ef4444', lineWidth: 1, lineStyle: 2, title: 'Short <40.5' });
+            rsiSeries.createPriceLine({ price: 60.5, color: '#10b981', lineWidth: 1, lineStyle: 2 });
+            rsiSeries.createPriceLine({ price: 40.5, color: '#ef4444', lineWidth: 1, lineStyle: 2 });
+        }
+
+        function setLayout(layoutType) {
+            const proLayout = document.getElementById('pro-layout');
+            if (layoutType === 'classic') {
+                proLayout.style.display = 'none';
+                document.getElementById('price-chart').style.height = '420px';
+            } else {
+                proLayout.style.display = 'flex';
+                document.getElementById('price-chart').style.height = '280px';
+            }
+            priceChart.timeScale().fitContent();
         }
 
         function switchMode(mode) {
@@ -492,15 +492,11 @@ HTML_TEMPLATE = """
             const btn = document.getElementById('auto-trade-toggle-btn');
             const badge = document.getElementById('auto-trade-badge');
             if (autoTradeEnabled) {
-                btn.className = "btn btn-success btn-sm py-1";
-                btn.innerText = "Disable Auto-Trade";
-                badge.className = "badge bg-success text-white border";
-                badge.innerText = "🤖 Auto-Trade: ON";
+                btn.className = "btn btn-success btn-sm py-0 px-2"; btn.innerText = "Auto: ON";
+                badge.className = "badge bg-success text-white"; badge.innerText = "Auto: ON";
             } else {
-                btn.className = "btn btn-outline-warning btn-sm py-1";
-                btn.innerText = "Enable Auto-Trade";
-                badge.className = "badge bg-dark border border-secondary text-warning";
-                badge.innerText = "🤖 Auto-Trade: OFF";
+                btn.className = "btn btn-outline-warning btn-sm py-0 px-2"; btn.innerText = "Auto Trade";
+                badge.className = "badge bg-dark border border-secondary text-warning"; badge.innerText = "Auto: OFF";
             }
         }
 
@@ -508,6 +504,7 @@ HTML_TEMPLATE = """
             currentSymbol = sym;
             currentTF = tf;
             document.getElementById('chart-title').innerText = `${sym}.P (${tf.toUpperCase()})`;
+            updateDockPanel(sym);
             try {
                 const res = await fetch(`/api/chart/${sym}/${tf}`);
                 const data = await res.json();
@@ -521,9 +518,21 @@ HTML_TEMPLATE = """
             } catch(e){}
         }
 
-        function switchTF(tf) {
-            ['15m', '1h', '4h', '1d'].forEach(t => document.getElementById('btn-' + t)?.classList.toggle('active', t === tf));
-            loadChartData(currentSymbol, tf);
+        function switchTF(tf) { loadChartData(currentSymbol, tf); }
+
+        function updateDockPanel(sym) {
+            const c = latestScanMap[sym];
+            if (!c) return;
+            document.getElementById('dock-symbol').innerText = c.symbol;
+            document.getElementById('dock-lot').innerText = c.lot_size;
+            const sb = document.getElementById('dock-signal-badge');
+            sb.innerText = 'SIGNAL: ' + c.signal;
+            sb.className = c.signal === 'STRONG LONG' ? 'badge text-bg-success' : (c.signal === 'STRONG SHORT' ? 'badge text-bg-danger' : 'badge bg-secondary');
+        }
+
+        function executeDockOrder(side) {
+            const c = latestScanMap[currentSymbol];
+            if (c) placeOrder(c.clean_sym, side, c.lot_size, c.sl, c.target);
         }
 
         async function fetchConfig() {
@@ -531,15 +540,21 @@ HTML_TEMPLATE = """
             const d = await res.json();
             document.getElementById('lbl-capital').innerText = "₹" + (d.capital_inr || 10000).toLocaleString();
             document.getElementById('lbl-risk').innerText = "₹" + (d.max_risk_inr || 500).toLocaleString();
-            document.getElementById('lbl-lev').innerText = (d.leverage || 5) + "x Min";
             document.getElementById('cfg-capital').value = d.capital_inr || 10000;
             document.getElementById('cfg-risk').value = d.max_risk_inr || 500;
             document.getElementById('cfg-lev').value = Math.max(5, d.leverage || 5);
             document.getElementById('cfg-rr').value = d.rr_ratio || 2.0;
+            document.getElementById('cfg-kcl').value = d.kc_length || 20;
+            document.getElementById('cfg-kcm').value = d.kc_mult || 1.0;
             document.getElementById('cfg-tg-token').value = d.telegram_token || '';
             document.getElementById('cfg-tg-chat').value = d.telegram_chat_id || '';
             document.getElementById('cfg-api-key').value = d.api_key || '';
             document.getElementById('cfg-api-secret').value = d.api_secret || '';
+        }
+
+        async function saveBotSettings() {
+            await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ telegram_token: document.getElementById('cfg-tg-token').value, telegram_chat_id: document.getElementById('cfg-tg-chat').value }) });
+            alert('Bot Settings Saved!'); bootstrap.Modal.getInstance(document.getElementById('botModal')).hide();
         }
 
         async function saveSettings() {
@@ -548,14 +563,13 @@ HTML_TEMPLATE = """
                 max_risk_inr: Number(document.getElementById('cfg-risk').value),
                 leverage: Math.max(5, Number(document.getElementById('cfg-lev').value)),
                 rr_ratio: Number(document.getElementById('cfg-rr').value),
-                telegram_token: document.getElementById('cfg-tg-token').value,
-                telegram_chat_id: document.getElementById('cfg-tg-chat').value,
+                kc_length: Number(document.getElementById('cfg-kcl').value),
+                kc_mult: Number(document.getElementById('cfg-kcm').value),
                 api_key: document.getElementById('cfg-api-key').value,
                 api_secret: document.getElementById('cfg-api-secret').value
             };
             await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-            fetchConfig();
-            bootstrap.Modal.getInstance(document.getElementById('settingsModal')).hide();
+            fetchConfig(); streamScanner(); alert('Settings Saved!'); bootstrap.Modal.getInstance(document.getElementById('settingsModal')).hide();
         }
 
         async function checkTradeState() {
@@ -563,39 +577,21 @@ HTML_TEMPLATE = """
             const d = await res.json();
             const box = document.getElementById('active-trade-container');
             if (d.active_trade) {
-                hasActiveTrade = true;
-                box.classList.remove('d-none');
+                hasActiveTrade = true; box.classList.remove('d-none');
                 const t = d.active_trade;
-                document.getElementById('at-details').innerText = `${t.symbol} | ${t.side} | Lot: ${t.qty} | SL: $${t.sl} | TP: $${t.target}`;
-                
+                document.getElementById('at-details').innerText = `${t.symbol} | ${t.side} | Lot: ${t.qty} | SL: $${t.sl}`;
                 const currP = latestScanMap[t.clean_sym]?.price || t.entry_price;
                 const diff = t.side === 'BUY' ? (currP - t.entry_price) : (t.entry_price - currP);
                 const pnlUsd = diff * t.qty;
-                const pnlInr = Math.round(pnlUsd * 88);
-                const pnlCol = pnlUsd >= 0 ? 'text-success' : 'text-danger';
-                document.getElementById('live-pnl-display').className = `fw-bold fs-6 me-3 ${pnlCol}`;
-                document.getElementById('live-pnl-display').innerText = `P&L: $${pnlUsd.toFixed(2)} (₹${pnlInr})`;
-            } else {
-                hasActiveTrade = false;
-                box.classList.add('d-none');
-            }
+                document.getElementById('live-pnl-display').innerText = `P&L: $${pnlUsd.toFixed(2)} (₹${Math.round(pnlUsd*88)})`;
+            } else { hasActiveTrade = false; box.classList.add('d-none'); }
         }
 
-        async function closeActiveTrade() {
-            await fetch('/api/close_active_trade', { method: 'POST' });
-            checkTradeState();
-        }
-
+        async function closeActiveTrade() { await fetch('/api/close_active_trade', { method: 'POST' }); checkTradeState(); }
         async function placeOrder(sym, side, qty, sl, target) {
             if (hasActiveTrade) { alert("1-Trade Lock Active!"); return; }
-            const res = await fetch('/api/order', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ symbol: sym, side: side, qty: qty, sl: sl, target: target })
-            });
-            const d = await res.json();
-            alert(d.message);
-            checkTradeState();
+            const res = await fetch('/api/order', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ symbol: sym, side: side, qty: qty, sl: sl, target: target }) });
+            const d = await res.json(); alert(d.message); checkTradeState();
         }
 
         async function streamScanner() {
@@ -603,27 +599,37 @@ HTML_TEMPLATE = """
                 const res = await fetch(`/api/scan?mode=${currentMode}`);
                 const data = await res.json();
                 const tbody = document.getElementById('scanner-table');
+                const proTbody = document.getElementById('pro-scanner-tbody');
                 if (!data || data.length === 0) return;
 
-                let html = '';
+                let html = '', proHtml = '';
                 data.forEach(c => {
                     latestScanMap[c.clean_sym] = c;
                     let bClass = c.signal === 'STRONG LONG' ? 'badge-long' : (c.signal === 'STRONG SHORT' ? 'badge-short' : 'badge-neutral');
                     const lock = hasActiveTrade ? 'disabled' : '';
 
                     if (autoTradeEnabled && !hasActiveTrade && (c.signal === 'STRONG LONG' || c.signal === 'STRONG SHORT')) {
-                        const side = c.signal === 'STRONG LONG' ? 'buy' : 'sell';
-                        placeOrder(c.clean_sym, side, c.lot_size, c.sl, c.target);
+                        placeOrder(c.clean_sym, c.signal === 'STRONG LONG' ? 'buy' : 'sell', c.lot_size, c.sl, c.target);
                     }
+
+                    proHtml += `
+                        <tr>
+                            <td class="coin-selector" onclick="loadChartData('${c.clean_sym}', currentTF)">${c.symbol}</td>
+                            <td>$${c.price}</td>
+                            <td><span class="${bClass}">${c.signal.replace('STRONG ', '')}</span></td>
+                            <td class="text-warning">${c.lot_size}</td>
+                            <td><button class="btn btn-sm btn-success py-0 px-1" ${lock} onclick="placeOrder('${c.clean_sym}','buy','${c.lot_size}','${c.sl}','${c.target}')">L</button></td>
+                        </tr>
+                    `;
 
                     html += `
                         <tr>
                             <td class="coin-selector" onclick="loadChartData('${c.clean_sym}', currentTF)">${c.symbol}</td>
                             <td class="fw-bold">$${c.price}</td>
-                            <td class="${c.htf_rsi > 60.5 ? 'text-success fw-bold' : ''}">${c.htf_rsi}</td>
-                            <td class="${c.ltf_rsi > 60.5 ? 'text-success fw-bold' : ''}">${c.ltf_rsi}</td>
+                            <td>${c.htf_rsi}</td>
+                            <td>${c.ltf_rsi}</td>
                             <td class="text-info">${c.kc_l} / ${c.kc_u}</td>
-                            <td class="text-secondary">${c.vol}</td>
+                            <td>${c.vol}</td>
                             <td><span class="${bClass}">${c.signal}</span></td>
                             <td class="text-danger">$${c.sl}</td>
                             <td class="text-success">$${c.target}</td>
@@ -637,13 +643,13 @@ HTML_TEMPLATE = """
                     `;
                 });
                 tbody.innerHTML = html;
-                document.getElementById('last-tick').innerText = "Live: " + new Date().toLocaleTimeString();
+                proTbody.innerHTML = proHtml;
+                document.getElementById('scanner-count').innerText = data.length + " Assets";
+                document.getElementById('last-tick').innerText = new Date().toLocaleTimeString();
             } catch(e){}
         }
 
-        initCharts();
-        fetchConfig();
-        checkTradeState();
+        initCharts(); fetchConfig(); checkTradeState();
         streamScanner().then(() => loadChartData('BTCUSD', '1h'));
         setInterval(() => { streamScanner(); checkTradeState(); }, 4000);
     </script>
@@ -662,17 +668,15 @@ def api_clean_memory():
 
 @app.route('/api/chart/<symbol>/<interval>')
 def api_chart(symbol, interval):
+    cfg = load_config()
     raw = fetch_delta_candles(symbol, interval, limit=65)
-    if not raw:
-        return jsonify({"error": "No data"})
+    if not raw: return jsonify({"error": "No data"})
     times = [int(k['time']) for k in raw]
     closes = [float(k['close']) for k in raw]
     highs = [float(k['high']) for k in raw]
     lows = [float(k['low']) for k in raw]
-    
-    kc_u, kc_m, kc_l = calculate_keltner_series(closes, highs, lows, 20, 1.0)
+    kc_u, kc_m, kc_l = calculate_keltner_series(closes, highs, lows, int(cfg.get("kc_length", 20)), float(cfg.get("kc_mult", 1.0)))
     rsis = calculate_rsi_series(closes, 14)
-    
     candles, u_b, m_b, l_b, r_d = [], [], [], [], []
     for i in range(len(times)):
         candles.append({"time": times[i], "open": float(raw[i]['open']), "high": highs[i], "low": lows[i], "close": closes[i]})
@@ -686,20 +690,15 @@ def api_chart(symbol, interval):
 def api_scan():
     mode = request.args.get('mode', 'swing').lower()
     cfg = load_config()
-    max_risk_inr = float(cfg.get("max_risk_inr", 500))
-    rr_ratio = float(cfg.get("rr_ratio", 2.0))
-    leverage = max(5.0, float(cfg.get("leverage", 5.0)))
-    risk_usdt = max_risk_inr / USDT_INR_RATE
-
     results = []
     with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(analyze_single_coin, sym, mode, risk_usdt, rr_ratio, leverage) for sym in FUTURES_WATCHLIST]
+        futures = [executor.submit(analyze_single_coin, sym, mode, float(cfg.get("max_risk_inr", 500))/USDT_INR_RATE, float(cfg.get("rr_ratio", 2.0)), max(5.0, float(cfg.get("leverage", 5.0))), int(cfg.get("kc_length", 20)), float(cfg.get("kc_mult", 1.0))) for sym in FUTURES_WATCHLIST]
         for f in futures:
             res = f.result()
             if res:
                 results.append(res)
                 if res['signal'] in ['STRONG LONG', 'STRONG SHORT']:
-                    send_telegram_alert(f"🚨 *Delta Alert*: {res['symbol']} ({res['mode']}) -> *{res['signal']}* @ ${res['price']} | Lot: {res['lot_size']}")
+                    send_telegram_alert(f"🚨 *Delta Alert*: {res['symbol']} ({res['mode']}) -> *{res['signal']}* @ ${res['price']}")
     return jsonify(results)
 
 @app.route('/api/config', methods=['GET', 'POST'])
@@ -707,19 +706,19 @@ def handle_config():
     if request.method == 'POST':
         old_cfg = load_config()
         new_cfg = request.json
-        if "****" in new_cfg.get("api_secret", ""):
-            new_cfg["api_secret"] = old_cfg.get("api_secret", "")
-        save_config(new_cfg)
+        for k, v in new_cfg.items():
+            if v is not None and v != "":
+                if k == "api_secret" and "****" in str(v): continue
+                old_cfg[k] = v
+        save_config(old_cfg)
         return jsonify({"status": "saved"})
     cfg = load_config()
     masked = dict(cfg)
-    if masked.get("api_secret"):
-        masked["api_secret"] = "****"
+    if masked.get("api_secret"): masked["api_secret"] = "****"
     return jsonify(masked)
 
 @app.route('/api/trade_state', methods=['GET'])
-def get_trade_state():
-    return jsonify(load_trade_state())
+def get_trade_state(): return jsonify(load_trade_state())
 
 @app.route('/api/close_active_trade', methods=['POST'])
 def close_trade():
@@ -729,29 +728,15 @@ def close_trade():
 @app.route('/api/order', methods=['POST'])
 def execute_order():
     state = load_trade_state()
+    if state.get("active_trade"): return jsonify({"status": "error", "message": "1 Active Trade running!"})
     data = request.json
-    symbol = data.get('symbol')
-    side = data.get('side')
-    qty = data.get('qty', 1)
-    sl = data.get('sl')
-    target = data.get('target')
-
+    symbol, side, qty, sl, target = data.get('symbol'), data.get('side'), data.get('qty', 1), data.get('sl'), data.get('target')
     candles = fetch_delta_candles(symbol, '1h', 5)
     entry_price = float(candles[-1]['close']) if candles else 0.0
-
     broker_res = execute_broker_order(symbol, side, qty)
-    new_trade = {
-        "symbol": symbol + ".P",
-        "clean_sym": symbol,
-        "side": side.upper(),
-        "qty": qty,
-        "entry_price": entry_price,
-        "entry_time": time.strftime("%H:%M:%S"),
-        "sl": sl,
-        "target": target
-    }
+    new_trade = {"symbol": symbol + ".P", "clean_sym": symbol, "side": side.upper(), "qty": qty, "entry_price": entry_price, "entry_time": time.strftime("%H:%M:%S"), "sl": sl, "target": target}
     save_trade_state({"active_trade": new_trade})
-    send_telegram_alert(f"✅ *Trade Executed*: {new_trade['side']} {new_trade['symbol']} | Qty: {qty} | Entry: ${entry_price} | SL: ${sl} \vert{} TP:${target}")
+    send_telegram_alert(f"✅ *Trade Executed*: {new_trade['side']} {new_trade['symbol']} | Qty: {qty} | Entry: ${entry_price}")
     return jsonify({"status": "success", "message": broker_res.get("message", "Order Placed!"), "trade": new_trade})
 
 if __name__ == '__main__':
