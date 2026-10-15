@@ -14,17 +14,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "broker_config.json")
 STATE_FILE = os.path.join(BASE_DIR, "trade_state.json")
 
-# Fast & Liquid Watchlist
 FUTURES_WATCHLIST = ['BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'GOLD', 'CRUDE']
 USDT_INR_RATE = 88.0
 
 MARKET_CACHE = {}
 SCAN_CACHE = {"swing": {"ts": 0, "data": []}, "intraday": {"ts": 0, "data": []}}
-CACHE_TTL = 15
+CACHE_TTL = 3
 
 def clean_old_memory():
     now = time.time()
-    expired = [k for k, v in MARKET_CACHE.items() if now - v['ts'] > 30]
+    expired = [k for k, v in MARKET_CACHE.items() if now - v['ts'] > 20]
     for k in expired:
         del MARKET_CACHE[k]
     gc.collect()
@@ -40,7 +39,6 @@ def load_config():
         "broker": "delta",
         "api_key": "",
         "api_secret": "",
-        "api_pin": "",
         "telegram_token": "",
         "telegram_chat_id": "",
         "capital_inr": 10000,
@@ -72,16 +70,13 @@ def send_telegram_alert(message):
     cfg = load_config()
     token = cfg.get("telegram_token", "").strip()
     chat_id = cfg.get("telegram_chat_id", "").strip()
-    if not token or not chat_id:
-        return
+    if not token or not chat_id: return
     try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
-        requests.post(url, json=payload, timeout=2)
+        requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}, timeout=2)
     except Exception:
         pass
 
-def fetch_delta_candles(symbol, resolution, limit=35):
+def fetch_delta_candles(symbol, resolution, limit=40):
     cache_key = f"{symbol}_{resolution}"
     now = int(time.time())
     if cache_key in MARKET_CACHE and (now - MARKET_CACHE[cache_key]['ts'] < CACHE_TTL):
@@ -118,8 +113,7 @@ def fetch_delta_candles(symbol, resolution, limit=35):
 
 def calculate_rsi_series(closes, period=14):
     rsis = [50.0] * len(closes)
-    if len(closes) <= period:
-        return rsis
+    if len(closes) <= period: return rsis
     gains, losses = [], []
     for i in range(1, len(closes)):
         diff = closes[i] - closes[i-1]
@@ -155,10 +149,9 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
     htf_tf = '1d' if mode == 'swing' else '1h'
     ltf_tf = '1h' if mode == 'swing' else '15m'
 
-    htf_raw = fetch_delta_candles(sym, htf_tf, 30)
-    ltf_raw = fetch_delta_candles(sym, ltf_tf, 30)
-    if not htf_raw or not ltf_raw:
-        return None
+    htf_raw = fetch_delta_candles(sym, htf_tf, 35)
+    ltf_raw = fetch_delta_candles(sym, ltf_tf, 35)
+    if not htf_raw or not ltf_raw: return None
 
     h_close = [float(k['close']) for k in htf_raw]
     h_high = [float(k['high']) for k in htf_raw]
@@ -170,7 +163,7 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
     l_vol = [float(k.get('volume', 0)) for k in ltf_raw]
 
     htf_rsi = calculate_rsi_series(h_close, 14)[-1]
-    htf_kcu, htf_ema, htf_kcl = calculate_keltner_series(h_close, h_high, h_low, kc_len, kc_m)
+    htf_kcu, _, htf_kcl = calculate_keltner_series(h_close, h_high, h_low, kc_len, kc_m)
 
     ltf_rsi = calculate_rsi_series(l_close, 14)[-1]
     ltf_kcu, _, ltf_kcl = calculate_keltner_series(l_close, l_high, l_low, kc_len, kc_m)
@@ -188,8 +181,7 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
     sl_buffer = 0.998 if mode == 'swing' else 0.999
     sl_price = round(ltf_kcl[-1] * sl_buffer, 4)
     per_unit_risk = abs(curr_price - sl_price)
-    if per_unit_risk == 0:
-        per_unit_risk = curr_price * 0.005
+    if per_unit_risk == 0: per_unit_risk = curr_price * 0.005
     calc_qty = round(risk_usdt / per_unit_risk, 3)
     target_price = round(curr_price + (per_unit_risk * rr_ratio), 4)
 
@@ -200,8 +192,7 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
         short_buf = 1.002 if mode == 'swing' else 1.001
         sl_price = round(ltf_kcu[-1] * short_buf, 4)
         per_unit_risk = abs(sl_price - curr_price)
-        if per_unit_risk == 0:
-            per_unit_risk = curr_price * 0.005
+        if per_unit_risk == 0: per_unit_risk = curr_price * 0.005
         calc_qty = round(risk_usdt / per_unit_risk, 3)
         target_price = round(curr_price - (per_unit_risk * rr_ratio), 4)
 
@@ -209,30 +200,16 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
     margin_inr = round(pos_val_inr / max(1.0, leverage))
 
     return {
-        'symbol': sym + '.P',
-        'clean_sym': sym,
-        'mode': mode.upper(),
-        'price': curr_price,
-        'htf_rsi': round(htf_rsi, 2),
-        'ltf_rsi': round(ltf_rsi, 2),
-        'kc_u': round(ltf_kcu[-1], 4),
-        'kc_l': round(ltf_kcl[-1], 4),
-        'vol': recent_vol,
-        'signal': signal,
-        'sl': sl_price,
-        'target': target_price,
-        'lot_size': calc_qty,
-        'margin_inr': margin_inr
+        'symbol': sym + '.P', 'clean_sym': sym, 'mode': mode.upper(),
+        'price': curr_price, 'htf_rsi': round(htf_rsi, 2), 'ltf_rsi': round(ltf_rsi, 2),
+        'kc_u': round(ltf_kcu[-1], 4), 'kc_l': round(ltf_kcl[-1], 4), 'vol': recent_vol,
+        'signal': signal, 'sl': sl_price, 'target': target_price, 'lot_size': calc_qty, 'margin_inr': margin_inr
     }
 
 def execute_broker_order(symbol, side, size):
     cfg = load_config()
-    api_key = cfg.get("api_key", "").strip()
-    api_secret = cfg.get("api_secret", "").strip()
-
-    if not api_key or not api_secret:
-        return {"status": "simulated", "message": "Demo Mode: API Key missing, simulated trade locked!"}
-
+    api_key, api_secret = cfg.get("api_key", "").strip(), cfg.get("api_secret", "").strip()
+    if not api_key or not api_secret: return {"status": "simulated", "message": "Demo Mode: Simulated Trade Placed!"}
     try:
         timestamp = int(time.time())
         endpoint = "/v2/orders"
@@ -251,7 +228,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Classic Dual-Chart Terminal</title>
+    <title>Fast Dual-Chart Terminal with KC & RSI</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
@@ -262,17 +239,17 @@ HTML_TEMPLATE = """
         .badge-long { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #10b981; font-weight: 700; }
         .badge-short { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; font-weight: 700; }
         .coin-link { cursor: pointer; color: #38bdf8; font-weight: bold; text-decoration: underline; }
-        .chart-box { height: 350px; width: 100%; }
+        .chart-box { height: 280px; width: 100%; }
+        .rsi-box { height: 100px; width: 100%; border-top: 1px solid #1f2937; }
         .modal-content { background-color: #111827; color: #fff; border: 1px solid #374151; }
         .form-control, .form-select { background-color: #070b14; border: 1px solid #374151; color: #fff; }
     </style>
 </head>
 <body class="p-2">
     <div class="container-fluid">
-        <!-- TOP BAR -->
         <div class="card-custom p-2 px-3 mb-2 d-flex flex-wrap justify-content-between align-items-center">
             <div class="d-flex align-items-center gap-3">
-                <h5 class="fw-bold text-info mb-0">⚡ CLASSIC DUAL-CHART TERMINAL</h5>
+                <h5 class="fw-bold text-info mb-0">⚡ 2-SEC FAST DUAL-CHART TERMINAL</h5>
                 <div class="btn-group btn-group-sm">
                     <button class="btn btn-outline-info active" id="mode-swing" onclick="switchMode('swing')">Swing (1D+1H)</button>
                     <button class="btn btn-outline-info" id="mode-intraday" onclick="switchMode('intraday')">Intraday (1H+15m)</button>
@@ -283,11 +260,10 @@ HTML_TEMPLATE = """
                 <button class="btn btn-outline-warning btn-sm py-1" onclick="toggleAutoTrade()" id="auto-trade-toggle-btn">Auto Trade</button>
                 <button class="btn btn-primary btn-sm py-1 fw-bold" data-bs-toggle="modal" data-bs-target="#botModal">🤖 Bot</button>
                 <button class="btn btn-info btn-sm py-1 fw-bold" data-bs-toggle="modal" data-bs-target="#settingsModal">⚙ Setup</button>
-                <span id="last-tick" class="text-secondary small">Live</span>
+                <span id="last-tick" class="text-secondary small">Live (2s)</span>
             </div>
         </div>
 
-        <!-- ACTIVE POSITION -->
         <div id="active-trade-container" class="mb-2 d-none">
             <div class="p-2 px-3 rounded d-flex justify-content-between align-items-center" style="background: rgba(16,185,129,0.15); border: 1px solid #10b981;">
                 <div><span class="badge bg-success me-2">LIVE POSITION</span><span class="fw-bold text-white" id="at-details">...</span></div>
@@ -295,32 +271,33 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- DUAL CHARTS SCREEN (Chart 1: Daily/HTF & Chart 2: 1Hour/LTF) -->
+        <!-- DUAL CHARTS WITH KC & RSI -->
         <div class="row g-2 mb-2">
             <div class="col-md-6">
                 <div class="card-custom p-2">
                     <div class="d-flex justify-content-between align-items-center px-1 mb-1">
-                        <span class="fw-bold text-warning" id="chart1-title">Chart 1: Daily (HTF Trend)</span>
+                        <span class="fw-bold text-warning" id="chart1-title">Chart 1: HTF Trend</span>
                         <span class="badge bg-secondary" id="active-symbol-1">BTCUSD.P</span>
                     </div>
                     <div id="chart-1" class="chart-box"></div>
+                    <div id="rsi-1" class="rsi-box"></div>
                 </div>
             </div>
             <div class="col-md-6">
                 <div class="card-custom p-2">
                     <div class="d-flex justify-content-between align-items-center px-1 mb-1">
-                        <span class="fw-bold text-info" id="chart2-title">Chart 2: 1-Hour (LTF Entry)</span>
+                        <span class="fw-bold text-info" id="chart2-title">Chart 2: LTF Entry</span>
                         <span class="badge bg-secondary" id="active-symbol-2">BTCUSD.P</span>
                     </div>
                     <div id="chart-2" class="chart-box"></div>
+                    <div id="rsi-2" class="rsi-box"></div>
                 </div>
             </div>
         </div>
 
-        <!-- CLEAN SCANNER TABLE -->
         <div class="card-custom p-2">
             <div class="d-flex justify-content-between align-items-center px-2 mb-2">
-                <span class="fw-bold text-info">📋 LIVE FUTURES & COMMODITIES SCANNER (Click any symbol to load Dual Charts)</span>
+                <span class="fw-bold text-info">📋 LIVE SCANNER (Click symbol to load Dual Charts with KC & RSI)</span>
                 <span class="small text-secondary">Capital: <b class="text-white" id="lbl-capital">₹10,000</b> | Risk: <b class="text-danger" id="lbl-risk">₹500</b></span>
             </div>
             <div class="table-responsive">
@@ -359,14 +336,30 @@ HTML_TEMPLATE = """
         let hasActiveTrade = false;
         let autoTradeEnabled = false;
         let latestScanMap = {};
-        let chart1, series1, chart2, series2;
+        let c1, s1, u1, m1, l1, r1, rs1;
+        let c2, s2, u2, m2, l2, r2, rs2;
 
         function initCharts() {
-            chart1 = LightweightCharts.createChart(document.getElementById('chart-1'), { layout: { background: { color: '#111827' }, textColor: '#9ca3af' }, grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } } });
-            series1 = chart1.addCandlestickSeries({ upColor: '#10b981', downColor: '#ef4444' });
+            c1 = LightweightCharts.createChart(document.getElementById('chart-1'), { layout: { background: { color: '#111827' }, textColor: '#9ca3af' }, grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } } });
+            s1 = c1.addCandlestickSeries({ upColor: '#10b981', downColor: '#ef4444' });
+            u1 = c1.addLineSeries({ color: '#00f2fe', lineWidth: 2 }); m1 = c1.addLineSeries({ color: '#f59e0b', lineWidth: 1, lineStyle: 2 }); l1 = c1.addLineSeries({ color: '#00f2fe', lineWidth: 2 });
 
-            chart2 = LightweightCharts.createChart(document.getElementById('chart-2'), { layout: { background: { color: '#111827' }, textColor: '#9ca3af' }, grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } } });
-            series2 = chart2.addCandlestickSeries({ upColor: '#10b981', downColor: '#ef4444' });
+            r1 = LightweightCharts.createChart(document.getElementById('rsi-1'), { layout: { background: { color: '#111827' }, textColor: '#9ca3af' }, grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } }, timeScale: { visible: false } });
+            rs1 = r1.addLineSeries({ color: '#a855f7', lineWidth: 2 });
+            rs1.createPriceLine({ price: 60.5, color: '#10b981', lineWidth: 1, lineStyle: 2 });
+            rs1.createPriceLine({ price: 40.5, color: '#ef4444', lineWidth: 1, lineStyle: 2 });
+
+            c2 = LightweightCharts.createChart(document.getElementById('chart-2'), { layout: { background: { color: '#111827' }, textColor: '#9ca3af' }, grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } } });
+            s2 = c2.addCandlestickSeries({ upColor: '#10b981', downColor: '#ef4444' });
+            u2 = c2.addLineSeries({ color: '#00f2fe', lineWidth: 2 }); m2 = c2.addLineSeries({ color: '#f59e0b', lineWidth: 1, lineStyle: 2 }); l2 = c2.addLineSeries({ color: '#00f2fe', lineWidth: 2 });
+
+            r2 = LightweightCharts.createChart(document.getElementById('rsi-2'), { layout: { background: { color: '#111827' }, textColor: '#9ca3af' }, grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } }, timeScale: { visible: false } });
+            rs2 = r2.addLineSeries({ color: '#a855f7', lineWidth: 2 });
+            rs2.createPriceLine({ price: 60.5, color: '#10b981', lineWidth: 1, lineStyle: 2 });
+            rs2.createPriceLine({ price: 40.5, color: '#ef4444', lineWidth: 1, lineStyle: 2 });
+
+            c1.timeScale().subscribeVisibleLogicalRangeChange(range => { if(range) r1.timeScale().setVisibleLogicalRange(range); });
+            c2.timeScale().subscribeVisibleLogicalRangeChange(range => { if(range) r2.timeScale().setVisibleLogicalRange(range); });
         }
 
         async function loadDualCharts(sym) {
@@ -377,17 +370,21 @@ HTML_TEMPLATE = """
             const htf = currentMode === 'swing' ? '1d' : '1h';
             const ltf = currentMode === 'swing' ? '1h' : '15m';
 
-            document.getElementById('chart1-title').innerText = `Chart 1: ${htf.toUpperCase()} (HTF Trend)`;
-            document.getElementById('chart2-title').innerText = `Chart 2: ${ltf.toUpperCase()} (Entry LTF)`;
+            document.getElementById('chart1-title').innerText = `Chart 1: ${htf.toUpperCase()} (HTF Trend + KC & RSI)`;
+            document.getElementById('chart2-title').innerText = `Chart 2: ${ltf.toUpperCase()} (LTF Entry + KC & RSI)`;
 
             try {
                 const res1 = await fetch(`/api/chart/${sym}/${htf}`);
                 const d1 = await res1.json();
-                if (d1.candles) series1.setData(d1.candles);
+                if (d1.candles) {
+                    s1.setData(d1.candles); u1.setData(d1.kc_upper); m1.setData(d1.kc_mid); l1.setData(d1.kc_lower); rs1.setData(d1.rsi);
+                }
 
                 const res2 = await fetch(`/api/chart/${sym}/${ltf}`);
                 const d2 = await res2.json();
-                if (d2.candles) series2.setData(d2.candles);
+                if (d2.candles) {
+                    s2.setData(d2.candles); u2.setData(d2.kc_upper); m2.setData(d2.kc_mid); l2.setData(d2.kc_lower); rs2.setData(d2.rsi);
+                }
             } catch(e){}
         }
 
@@ -509,13 +506,13 @@ HTML_TEMPLATE = """
                     `;
                 });
                 tbody.innerHTML = html;
-                document.getElementById('last-tick').innerText = new Date().toLocaleTimeString();
+                document.getElementById('last-tick').innerText = "Live (2s): " + new Date().toLocaleTimeString();
             } catch(e){}
         }
 
         initCharts(); fetchConfig(); checkTradeState();
         streamScanner().then(() => loadDualCharts('BTCUSD'));
-        setInterval(() => { streamScanner(); checkTradeState(); }, 5000);
+        setInterval(() => { streamScanner(); checkTradeState(); }, 2000);
     </script>
 </body>
 </html>
@@ -532,18 +529,29 @@ def api_clean_memory():
 
 @app.route('/api/chart/<symbol>/<interval>')
 def api_chart(symbol, interval):
-    raw = fetch_delta_candles(symbol, interval, limit=35)
+    cfg = load_config()
+    raw = fetch_delta_candles(symbol, interval, limit=40)
     if not raw: return jsonify({"error": "No data"})
-    candles = []
-    for k in raw:
-        candles.append({"time": int(k['time']), "open": float(k['open']), "high": float(k['high']), "low": float(k['low']), "close": float(k['close'])})
-    return jsonify({"candles": candles})
+    times = [int(k['time']) for k in raw]
+    closes = [float(k['close']) for k in raw]
+    highs = [float(k['high']) for k in raw]
+    lows = [float(k['low']) for k in raw]
+    kc_u, kc_m, kc_l = calculate_keltner_series(closes, highs, lows, int(cfg.get("kc_length", 20)), float(cfg.get("kc_mult", 1.0)))
+    rsis = calculate_rsi_series(closes, 14)
+    candles, u_b, m_b, l_b, r_d = [], [], [], [], []
+    for i in range(len(times)):
+        candles.append({"time": times[i], "open": float(raw[i]['open']), "high": highs[i], "low": lows[i], "close": closes[i]})
+        u_b.append({"time": times[i], "value": round(kc_u[i], 4)})
+        m_b.append({"time": times[i], "value": round(kc_m[i], 4)})
+        l_b.append({"time": times[i], "value": round(kc_l[i], 4)})
+        r_d.append({"time": times[i], "value": round(rsis[i], 2)})
+    return jsonify({"candles": candles, "kc_upper": u_b, "kc_mid": m_b, "kc_lower": l_b, "rsi": r_d})
 
 @app.route('/api/scan')
 def api_scan():
     mode = request.args.get('mode', 'swing').lower()
     now = time.time()
-    if SCAN_CACHE[mode]["data"] and (now - SCAN_CACHE[mode]["ts"] < 12):
+    if SCAN_CACHE[mode]["data"] and (now - SCAN_CACHE[mode]["ts"] < 5):
         return jsonify(SCAN_CACHE[mode]["data"])
 
     cfg = load_config()
