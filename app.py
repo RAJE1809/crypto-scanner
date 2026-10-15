@@ -21,12 +21,14 @@ FUTURES_WATCHLIST = [
 ]
 USDT_INR_RATE = 88.0
 
+# --- OPTIMIZED FAST CACHE (10 Seconds TTL to prevent API lag) ---
 MARKET_CACHE = {}
-CACHE_TTL = 4
+SCAN_CACHE = {"swing": {"ts": 0, "data": []}, "intraday": {"ts": 0, "data": []}}
+CACHE_TTL = 10 
 
 def clean_old_memory():
     now = time.time()
-    expired = [k for k, v in MARKET_CACHE.items() if now - v['ts'] > 30]
+    expired = [k for k, v in MARKET_CACHE.items() if now - v['ts'] > 40]
     for k in expired:
         del MARKET_CACHE[k]
     gc.collect()
@@ -80,11 +82,11 @@ def send_telegram_alert(message):
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
-        requests.post(url, json=payload, timeout=4)
+        requests.post(url, json=payload, timeout=3)
     except Exception:
         pass
 
-def fetch_delta_candles(symbol, resolution, limit=65):
+def fetch_delta_candles(symbol, resolution, limit=50):
     cache_key = f"{symbol}_{resolution}"
     now = int(time.time())
     if cache_key in MARKET_CACHE and (now - MARKET_CACHE[cache_key]['ts'] < CACHE_TTL):
@@ -92,7 +94,7 @@ def fetch_delta_candles(symbol, resolution, limit=65):
 
     sec_map = {'15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
     step = sec_map.get(resolution, 3600)
-    start_time = now - (step * (limit + 8))
+    start_time = now - (step * (limit + 5))
 
     sym_variants = [symbol, symbol.replace('USD', 'USDT')]
     endpoints = [
@@ -105,10 +107,10 @@ def fetch_delta_candles(symbol, resolution, limit=65):
         for sym in sym_variants:
             try:
                 params = {"resolution": resolution, "symbol": sym, "start": start_time, "end": now}
-                res = requests.get(base_url, params=params, headers=headers, timeout=3.5)
+                res = requests.get(base_url, params=params, headers=headers, timeout=2.5)
                 if res.status_code == 200:
                     candles = res.json().get("result", [])
-                    if candles and len(candles) > 15:
+                    if candles and len(candles) > 10:
                         candles = sorted(candles, key=lambda x: int(x['time']))
                         unique, seen = [], set()
                         for c in candles:
@@ -162,8 +164,8 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
     htf_tf = '1d' if mode == 'swing' else '1h'
     ltf_tf = '1h' if mode == 'swing' else '15m'
 
-    htf_raw = fetch_delta_candles(sym, htf_tf, 45)
-    ltf_raw = fetch_delta_candles(sym, ltf_tf, 45)
+    htf_raw = fetch_delta_candles(sym, htf_tf, 35)
+    ltf_raw = fetch_delta_candles(sym, ltf_tf, 35)
     if not htf_raw or not ltf_raw:
         return None
 
@@ -184,18 +186,14 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
 
     curr_price = l_close[-1]
     recent_vol = round(sum(l_vol[-5:]), 1)
-    avg_vol = sum(l_vol[-20:]) / 20.0 if len(l_vol) >= 20 else recent_vol
 
-    # --- ADVANCED FILTERS (Trend Filter & Volume Spike) ---
-    # Trend Filter: Price must be above/below 200 EMA (or HTF EMA 20) to avoid sideways fakeouts
     is_trending_up = curr_price > htf_ema[-1]
     is_trending_down = curr_price < htf_ema[-1]
-    is_high_volume = l_vol[-1] > (avg_vol * 1.1)  # Volume must be higher than average
 
-    htf_long = (htf_rsi > 60.50) and (h_close[-1] > htf_kcu[-1]) and is_trending_up and is_high_volume
+    htf_long = (htf_rsi > 60.50) and (h_close[-1] > htf_kcu[-1]) and is_trending_up
     ltf_long = (ltf_rsi > 60.50) and (curr_price > ltf_kcu[-1])
 
-    htf_short = (htf_rsi < 40.50) and (h_close[-1] < htf_kcl[-1]) and is_trending_down and is_high_volume
+    htf_short = (htf_rsi < 40.50) and (h_close[-1] < htf_kcl[-1]) and is_trending_down
     ltf_short = (ltf_rsi < 40.50) and (curr_price < ltf_kcl[-1])
 
     signal = "NEUTRAL"
@@ -268,7 +266,7 @@ def execute_broker_order(symbol, side, size):
         }
         if api_pin:
             headers["x-pin"] = api_pin
-        res = requests.post("https://api.india.delta.exchange" + endpoint, data=payload, headers=headers, timeout=6)
+        res = requests.post("https://api.india.delta.exchange" + endpoint, data=payload, headers=headers, timeout=5)
         return {"status": "success", "message": f"Delta Order Executed: {res.text}"}
     except Exception as e:
         return {"status": "error", "message": f"Delta Error: {str(e)}"}
@@ -279,7 +277,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pro Filtered Trading Terminal</title>
+    <title>Fast Pro Trading Terminal</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
@@ -309,14 +307,13 @@ HTML_TEMPLATE = """
     <div class="container-fluid">
         <div class="terminal-card p-2 px-3 mb-1 d-flex flex-wrap justify-content-between align-items-center">
             <div class="d-flex align-items-center gap-3">
-                <h6 class="fw-bold text-info mb-0"><span class="live-dot me-2"></span>SPIDER FILTERED TERMINAL</h6>
+                <h6 class="fw-bold text-info mb-0"><span class="live-dot me-2"></span>SPIDER FAST TERMINAL</h6>
                 <div class="btn-group btn-group-sm" role="group">
                     <button type="button" class="btn btn-outline-info mode-btn active py-0" id="mode-swing" onclick="switchMode('swing')">Swing (1D+1H)</button>
                     <button type="button" class="btn btn-outline-info mode-btn py-0" id="mode-intraday" onclick="switchMode('intraday')">Intraday (1H+15m)</button>
                 </div>
             </div>
             <div class="d-flex align-items-center gap-2">
-                <span class="badge bg-dark border border-secondary text-success">Trend + Vol Filter: ON</span>
                 <span class="badge bg-dark border border-secondary text-warning" id="auto-trade-badge">Auto: OFF</span>
                 <button class="btn btn-outline-warning btn-sm py-0 px-2" onclick="toggleAutoTrade()" id="auto-trade-toggle-btn">Auto Trade</button>
                 <div class="btn-group btn-group-sm">
@@ -325,7 +322,7 @@ HTML_TEMPLATE = """
                 </div>
                 <button class="btn btn-primary btn-sm py-0 px-2 fw-bold" data-bs-toggle="modal" data-bs-target="#botModal">🤖 Bot</button>
                 <button class="btn btn-info btn-sm py-0 px-2 fw-bold" data-bs-toggle="modal" data-bs-target="#settingsModal">⚙ Setup</button>
-                <span id="last-tick" class="text-secondary small">Live</span>
+                <span id="last-tick" class="text-secondary small">Fast</span>
             </div>
         </div>
 
@@ -358,7 +355,7 @@ HTML_TEMPLATE = """
                     <div class="d-flex flex-column gap-1">
                         <div class="terminal-card p-2">
                             <div class="d-flex justify-content-between align-items-center border-bottom border-secondary pb-1 mb-1">
-                                <span class="fw-bold text-info" style="font-size:11px;">🔍 LIVE SCANNER (Filtered)</span>
+                                <span class="fw-bold text-info" style="font-size:11px;">🔍 FAST LIVE SCANNER</span>
                                 <span class="badge bg-dark" id="scanner-count">16 Assets</span>
                             </div>
                             <div class="table-responsive" style="max-height: 250px; overflow-y: auto;">
@@ -648,7 +645,7 @@ HTML_TEMPLATE = """
 
         initCharts(); fetchConfig(); checkTradeState();
         streamScanner().then(() => loadChartData('BTCUSD', '1h'));
-        setInterval(() => { streamScanner(); checkTradeState(); }, 4000);
+        setInterval(() => { streamScanner(); checkTradeState(); }, 5000);
     </script>
 </body>
 </html>
@@ -666,7 +663,7 @@ def api_clean_memory():
 @app.route('/api/chart/<symbol>/<interval>')
 def api_chart(symbol, interval):
     cfg = load_config()
-    raw = fetch_delta_candles(symbol, interval, limit=65)
+    raw = fetch_delta_candles(symbol, interval, limit=50)
     if not raw: return jsonify({"error": "No data"})
     times = [int(k['time']) for k in raw]
     closes = [float(k['close']) for k in raw]
@@ -686,6 +683,12 @@ def api_chart(symbol, interval):
 @app.route('/api/scan')
 def api_scan():
     mode = request.args.get('mode', 'swing').lower()
+    now = time.time()
+    
+    # Return from cache if scanned recently (Fast Loading)
+    if SCAN_CACHE[mode]["data"] and (now - SCAN_CACHE[mode]["ts"] < 8):
+        return jsonify(SCAN_CACHE[mode]["data"])
+
     cfg = load_config()
     results = []
     with ThreadPoolExecutor(max_workers=8) as executor:
@@ -695,7 +698,9 @@ def api_scan():
             if res:
                 results.append(res)
                 if res['signal'] in ['STRONG LONG', 'STRONG SHORT']:
-                    send_telegram_alert(f"🚨 *Delta Filtered Alert*: {res['symbol']} ({res['mode']}) -> *{res['signal']}* @ ${res['price']}")
+                    send_telegram_alert(f"🚨 *Delta Fast Alert*: {res['symbol']} ({res['mode']}) -> *{res['signal']}* @ ${res['price']}")
+    
+    SCAN_CACHE[mode] = {"ts": now, "data": results}
     return jsonify(results)
 
 @app.route('/api/config', methods=['GET', 'POST'])
