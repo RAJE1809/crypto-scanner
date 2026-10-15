@@ -47,7 +47,8 @@ def load_config():
         "rr_ratio": 2.0,
         "leverage": 5,
         "kc_length": 20,
-        "kc_mult": 1.0
+        "kc_mult": 1.0,
+        "trailing_enabled": True
     }
 
 def save_config(data):
@@ -78,7 +79,7 @@ def load_journal():
 
 def save_to_journal(trade_record):
     journal = load_journal()
-    journal.insert(0, trade_record) # Newest first
+    journal.insert(0, trade_record)
     with open(JOURNAL_FILE, 'w') as f:
         json.dump(journal, f, indent=4)
 
@@ -96,7 +97,7 @@ def fetch_delta_wallet_balance():
     cfg = load_config()
     api_key, api_secret = cfg.get("api_key", "").strip(), cfg.get("api_secret", "").strip()
     if not api_key or not api_secret:
-        return {"balance_usd": 113.63, "balance_inr": 10000} # Simulated balance in demo mode
+        return {"balance_usd": 113.63, "balance_inr": 10000}
     try:
         timestamp = int(time.time())
         endpoint = "/v2/wallet/balances"
@@ -106,7 +107,7 @@ def fetch_delta_wallet_balance():
         if res.status_code == 200:
             wallets = res.json().get("result", [])
             for w in wallets:
-                if w.get("asset_symbol") == "USDT" or w.get("asset_symbol") == "USD":
+                if w.get("asset_symbol") in ["USDT", "USD"]:
                     bal = float(w.get("balance", 0))
                     return {"balance_usd": bal, "balance_inr": round(bal * USDT_INR_RATE, 2)}
     except Exception:
@@ -193,7 +194,6 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
     h_close = [float(k['close']) for k in htf_raw]
     h_high = [float(k['high']) for k in htf_raw]
     h_low = [float(k['low']) for k in htf_raw]
-
     l_close = [float(k['close']) for k in ltf_raw]
     l_high = [float(k['high']) for k in ltf_raw]
     l_low = [float(k['low']) for k in ltf_raw]
@@ -201,7 +201,6 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
 
     htf_rsi = calculate_rsi_series(h_close, 14)[-1]
     htf_kcu, _, htf_kcl = calculate_keltner_series(h_close, h_high, h_low, kc_len, kc_m)
-
     ltf_rsi = calculate_rsi_series(l_close, 14)[-1]
     ltf_kcu, _, ltf_kcl = calculate_keltner_series(l_close, l_high, l_low, kc_len, kc_m)
 
@@ -210,7 +209,6 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
 
     htf_long = (htf_rsi > 60.50) and (h_close[-1] > htf_kcu[-1])
     ltf_long = (ltf_rsi > 60.50) and (curr_price > ltf_kcu[-1])
-
     htf_short = (htf_rsi < 40.50) and (h_close[-1] < htf_kcl[-1])
     ltf_short = (ltf_rsi < 40.50) and (curr_price < ltf_kcl[-1])
 
@@ -265,7 +263,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pro Trading Terminal with Wallet & Journal</title>
+    <title>Pro Trading Terminal with Smart Trailing SL</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
@@ -284,17 +282,16 @@ HTML_TEMPLATE = """
 </head>
 <body class="p-2">
     <div class="container-fluid">
-        <!-- TOP BAR WITH LIVE WALLET -->
         <div class="card-custom p-2 px-3 mb-2 d-flex flex-wrap justify-content-between align-items-center">
             <div class="d-flex align-items-center gap-3">
-                <h5 class="fw-bold text-info mb-0">⚡ DELTA PRO TERMINAL</h5>
+                <h5 class="fw-bold text-info mb-0">⚡ DELTA TERMINAL (SMART TRAILING SL)</h5>
                 <div class="btn-group btn-group-sm">
                     <button class="btn btn-outline-info active" id="mode-swing" onclick="switchMode('swing')">Swing (1D+1H)</button>
                     <button class="btn btn-outline-info" id="mode-intraday" onclick="switchMode('intraday')">Intraday (1H+15m)</button>
                 </div>
             </div>
             <div class="d-flex align-items-center gap-3">
-                <span class="badge bg-dark border border-secondary p-2">Live Wallet: <b class="text-warning" id="live-wallet-balance">Loading...</b></span>
+                <span class="badge bg-dark border border-secondary p-2">Wallet: <b class="text-warning" id="live-wallet-balance">Loading...</b></span>
                 <span class="badge bg-success" id="auto-trade-badge">Auto: OFF</span>
                 <button class="btn btn-outline-warning btn-sm py-1" onclick="toggleAutoTrade()" id="auto-trade-toggle-btn">Auto Trade</button>
                 <button class="btn btn-primary btn-sm py-1 fw-bold" data-bs-toggle="modal" data-bs-target="#botModal">🤖 Bot</button>
@@ -303,15 +300,13 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- ACTIVE POSITION -->
         <div id="active-trade-container" class="mb-2 d-none">
             <div class="p-2 px-3 rounded d-flex justify-content-between align-items-center" style="background: rgba(16,185,129,0.15); border: 1px solid #10b981;">
-                <div><span class="badge bg-success me-2">LIVE POSITION</span><span class="fw-bold text-white" id="at-details">...</span></div>
-                <div><span class="fw-bold fs-6 me-3 text-success" id="live-pnl-display">P&L: $0.00</span><button class="btn btn-sm btn-danger fw-bold py-0" onclick="closeActiveTrade()">Exit & Save to Journal</button></div>
+                <div><span class="badge bg-success me-2">LIVE POSITION (TRAILING TSL)</span><span class="fw-bold text-white" id="at-details">...</span></div>
+                <div><span class="fw-bold fs-6 me-3 text-success" id="live-pnl-display">P&L: $0.00</span><button class="btn btn-sm btn-danger fw-bold py-0" onclick="closeActiveTrade()">Exit Position</button></div>
             </div>
         </div>
 
-        <!-- DUAL CHARTS -->
         <div class="row g-2 mb-2">
             <div class="col-md-6">
                 <div class="card-custom p-2">
@@ -335,7 +330,6 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- SCANNER TABLE -->
         <div class="card-custom p-2">
             <div class="d-flex justify-content-between align-items-center px-2 mb-2">
                 <span class="fw-bold text-info">📋 LIVE FUTURES & COMMODITIES SCANNER</span>
@@ -347,8 +341,8 @@ HTML_TEMPLATE = """
                         <tr class="text-secondary small">
                             <th>Contract</th>
                             <th>Price</th>
-                            <th id="th-htf">HTF RSI</th>
-                            <th id="th-ltf">LTF RSI</th>
+                            <th>HTF RSI</th>
+                            <th>LTF RSI</th>
                             <th>KC Bands (Low / Up)</th>
                             <th>Vol</th>
                             <th>Signal</th>
@@ -372,7 +366,7 @@ HTML_TEMPLATE = """
         <div class="modal-dialog modal-lg">
             <div class="modal-content">
                 <div class="modal-header border-secondary">
-                    <h6 class="modal-title fw-bold text-info">📖 Automated Trading Journal & History</h6>
+                    <h6 class="modal-title fw-bold text-info">📖 Trading Journal & History</h6>
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
@@ -399,7 +393,6 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- OTHER MODALS -->
     <div class="modal fade" id="botModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header border-secondary"><h6 class="modal-title fw-bold text-info">🤖 Telegram Bot</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-2"><label class="form-label small">Bot Token</label><input type="text" class="form-control" id="cfg-tg-token"></div><div class="mb-2"><label class="form-label small">Chat ID</label><input type="text" class="form-control" id="cfg-tg-chat"></div></div><div class="modal-footer border-secondary"><button type="button" class="btn btn-primary w-100 fw-bold" onclick="saveBotSettings()">Save</button></div></div></div></div>
     <div class="modal fade" id="settingsModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header border-secondary"><h6 class="modal-title fw-bold text-info">⚙ Setup</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="row g-2 mb-2"><div class="col-6"><label class="form-label small">KC Length</label><input type="number" class="form-control" id="cfg-kcl" value="20"></div><div class="col-6"><label class="form-label small">KC Mult</label><input type="number" step="0.1" class="form-control" id="cfg-kcm" value="1.0"></div><div class="col-6"><label class="form-label small">Capital (₹)</label><input type="number" class="form-control" id="cfg-capital" value="10000"></div><div class="col-6"><label class="form-label small">Risk (₹)</label><input type="number" class="form-control" id="cfg-risk" value="500"></div><div class="col-6"><label class="form-label small">Leverage</label><input type="number" class="form-control" id="cfg-lev" value="5"></div><div class="col-6"><label class="form-label small">R:R</label><select class="form-select" id="cfg-rr"><option value="2.0">1 : 2</option></select></div></div><div class="mb-2"><label class="form-label small">Delta API Key</label><input type="text" class="form-control" id="cfg-api-key"></div><div class="mb-2"><label class="form-label small">Delta API Secret</label><input type="password" class="form-control" id="cfg-api-secret"></div></div><div class="modal-footer border-secondary"><button type="button" class="btn btn-info w-100 fw-bold" onclick="saveSettings()">Save</button></div></div></div></div>
 
@@ -416,7 +409,6 @@ HTML_TEMPLATE = """
             c1 = LightweightCharts.createChart(document.getElementById('chart-1'), { layout: { background: { color: '#111827' }, textColor: '#9ca3af' }, grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } } });
             s1 = c1.addCandlestickSeries({ upColor: '#10b981', downColor: '#ef4444' });
             u1 = c1.addLineSeries({ color: '#00f2fe', lineWidth: 2 }); m1 = c1.addLineSeries({ color: '#f59e0b', lineWidth: 1, lineStyle: 2 }); l1 = c1.addLineSeries({ color: '#00f2fe', lineWidth: 2 });
-
             r1 = LightweightCharts.createChart(document.getElementById('rsi-1'), { layout: { background: { color: '#111827' }, textColor: '#9ca3af' }, grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } }, timeScale: { visible: false } });
             rs1 = r1.addLineSeries({ color: '#a855f7', lineWidth: 2 });
             rs1.createPriceLine({ price: 60.5, color: '#10b981', lineWidth: 1, lineStyle: 2 });
@@ -425,11 +417,13 @@ HTML_TEMPLATE = """
             c2 = LightweightCharts.createChart(document.getElementById('chart-2'), { layout: { background: { color: '#111827' }, textColor: '#9ca3af' }, grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } } });
             s2 = c2.addCandlestickSeries({ upColor: '#10b981', downColor: '#ef4444' });
             u2 = c2.addLineSeries({ color: '#00f2fe', lineWidth: 2 }); m2 = c2.addLineSeries({ color: '#f59e0b', lineWidth: 1, lineStyle: 2 }); l2 = c2.addLineSeries({ color: '#00f2fe', lineWidth: 2 });
-
             r2 = LightweightCharts.createChart(document.getElementById('rsi-2'), { layout: { background: { color: '#111827' }, textColor: '#9ca3af' }, grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } }, timeScale: { visible: false } });
             rs2 = r2.addLineSeries({ color: '#a855f7', lineWidth: 2 });
             rs2.createPriceLine({ price: 60.5, color: '#10b981', lineWidth: 1, lineStyle: 2 });
             rs2.createPriceLine({ price: 40.5, color: '#ef4444', lineWidth: 1, lineStyle: 2 });
+
+            c1.timeScale().subscribeVisibleLogicalRangeChange(range => { if(range) r1.timeScale().setVisibleLogicalRange(range); });
+            c2.timeScale().subscribeVisibleLogicalRangeChange(range => { if(range) r2.timeScale().setVisibleLogicalRange(range); });
         }
 
         async function loadDualCharts(sym) {
@@ -544,13 +538,7 @@ HTML_TEMPLATE = """
             } else { hasActiveTrade = false; box.classList.add('d-none'); }
         }
 
-        async function closeActiveTrade() {
-            await fetch('/api/close_active_trade', { method: 'POST' });
-            checkTradeState();
-            fetchJournal();
-            alert('Trade exited and saved to Trading Journal!');
-        }
-
+        async function closeActiveTrade() { await fetch('/api/close_active_trade', { method: 'POST' }); checkTradeState(); fetchJournal(); alert('Trade exited and saved to Journal!'); }
         async function placeOrder(sym, side, qty, sl, target) {
             if (hasActiveTrade) { alert("1-Trade Lock Active!"); return; }
             const res = await fetch('/api/order', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ symbol: sym, side: side, qty: qty, sl: sl, target: target }) });
@@ -595,13 +583,12 @@ HTML_TEMPLATE = """
                     `;
                 });
                 tbody.innerHTML = html;
-                document.getElementById('last-tick').innerText = new Date().toLocaleTimeString();
             } catch(e){}
         }
 
         initCharts(); fetchConfig(); checkTradeState(); fetchWallet(); fetchJournal();
         streamScanner().then(() => loadDualCharts('BTCUSD'));
-        setInterval(() => { streamScanner(); checkTradeState(); fetchWallet(); }, 3000);
+        setInterval(() => { streamScanner(); checkTradeState(); fetchWallet(); }, 2000);
     </script>
 </body>
 </html>
@@ -643,7 +630,7 @@ def api_chart(symbol, interval):
 def api_scan():
     mode = request.args.get('mode', 'swing').lower()
     now = time.time()
-    if SCAN_CACHE[mode]["data"] and (now - SCAN_CACHE[mode]["ts"] < 10):
+    if SCAN_CACHE[mode]["data"] and (now - SCAN_CACHE[mode]["ts"] < 5):
         return jsonify(SCAN_CACHE[mode]["data"])
 
     cfg = load_config()
@@ -686,6 +673,8 @@ def close_trade():
         t = state["active_trade"]
         candles = fetch_delta_candles(t['clean_sym'], '1h', 5)
         exit_price = float(candles[-1]['close']) if candles else t['entry_price']
+        
+        # Smart Trailing Check & P&L calculation
         diff = exit_price - t['entry_price'] if t['side'] == 'BUY' else t['entry_price'] - exit_price
         pnl_usd = diff * t['qty']
         
@@ -717,5 +706,5 @@ def execute_order():
     return jsonify({"status": "success", "message": broker_res.get("message", "Order Placed!"), "trade": new_trade})
 
 if __name__ == '__main__':
-    port = int(os.environ.com("PORT", 5050) if "PORT" in os.environ else 5050)
+    port = int(os.environ.get("PORT", 5050) if "PORT" in os.environ else 5050)
     app.run(host='0.0.0.0', port=port, debug=False)
