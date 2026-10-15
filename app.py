@@ -177,18 +177,25 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
     l_vol = [float(k.get('volume', 0)) for k in ltf_raw]
 
     htf_rsi = calculate_rsi_series(h_close, 14)[-1]
-    htf_kcu, _, htf_kcl = calculate_keltner_series(h_close, h_high, h_low, kc_len, kc_m)
+    htf_kcu, htf_ema, htf_kcl = calculate_keltner_series(h_close, h_high, h_low, kc_len, kc_m)
 
     ltf_rsi = calculate_rsi_series(l_close, 14)[-1]
     ltf_kcu, _, ltf_kcl = calculate_keltner_series(l_close, l_high, l_low, kc_len, kc_m)
 
     curr_price = l_close[-1]
     recent_vol = round(sum(l_vol[-5:]), 1)
+    avg_vol = sum(l_vol[-20:]) / 20.0 if len(l_vol) >= 20 else recent_vol
 
-    htf_long = (htf_rsi > 60.50) and (h_close[-1] > htf_kcu[-1])
+    # --- ADVANCED FILTERS (Trend Filter & Volume Spike) ---
+    # Trend Filter: Price must be above/below 200 EMA (or HTF EMA 20) to avoid sideways fakeouts
+    is_trending_up = curr_price > htf_ema[-1]
+    is_trending_down = curr_price < htf_ema[-1]
+    is_high_volume = l_vol[-1] > (avg_vol * 1.1)  # Volume must be higher than average
+
+    htf_long = (htf_rsi > 60.50) and (h_close[-1] > htf_kcu[-1]) and is_trending_up and is_high_volume
     ltf_long = (ltf_rsi > 60.50) and (curr_price > ltf_kcu[-1])
 
-    htf_short = (htf_rsi < 40.50) and (h_close[-1] < htf_kcl[-1])
+    htf_short = (htf_rsi < 40.50) and (h_close[-1] < htf_kcl[-1]) and is_trending_down and is_high_volume
     ltf_short = (ltf_rsi < 40.50) and (curr_price < ltf_kcl[-1])
 
     signal = "NEUTRAL"
@@ -202,9 +209,8 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
 
     if htf_long and ltf_long:
         signal = "STRONG LONG"
-    elif htf_short and ltf_short or (htf_rsi < 45 and ltf_rsi < 45):
-        if htf_short and ltf_short:
-            signal = "STRONG SHORT"
+    elif htf_short and ltf_short:
+        signal = "STRONG SHORT"
         short_buf = 1.002 if mode == 'swing' else 1.001
         sl_price = round(ltf_kcu[-1] * short_buf, 4)
         per_unit_risk = abs(sl_price - curr_price)
@@ -273,7 +279,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pro Multi-Window Trading Terminal</title>
+    <title>Pro Filtered Trading Terminal</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
@@ -303,13 +309,14 @@ HTML_TEMPLATE = """
     <div class="container-fluid">
         <div class="terminal-card p-2 px-3 mb-1 d-flex flex-wrap justify-content-between align-items-center">
             <div class="d-flex align-items-center gap-3">
-                <h6 class="fw-bold text-info mb-0"><span class="live-dot me-2"></span>SPIDER PRO TERMINAL</h6>
+                <h6 class="fw-bold text-info mb-0"><span class="live-dot me-2"></span>SPIDER FILTERED TERMINAL</h6>
                 <div class="btn-group btn-group-sm" role="group">
                     <button type="button" class="btn btn-outline-info mode-btn active py-0" id="mode-swing" onclick="switchMode('swing')">Swing (1D+1H)</button>
                     <button type="button" class="btn btn-outline-info mode-btn py-0" id="mode-intraday" onclick="switchMode('intraday')">Intraday (1H+15m)</button>
                 </div>
             </div>
             <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-dark border border-secondary text-success">Trend + Vol Filter: ON</span>
                 <span class="badge bg-dark border border-secondary text-warning" id="auto-trade-badge">Auto: OFF</span>
                 <button class="btn btn-outline-warning btn-sm py-0 px-2" onclick="toggleAutoTrade()" id="auto-trade-toggle-btn">Auto Trade</button>
                 <div class="btn-group btn-group-sm">
@@ -351,7 +358,7 @@ HTML_TEMPLATE = """
                     <div class="d-flex flex-column gap-1">
                         <div class="terminal-card p-2">
                             <div class="d-flex justify-content-between align-items-center border-bottom border-secondary pb-1 mb-1">
-                                <span class="fw-bold text-info" style="font-size:11px;">🔍 LIVE SCANNER (Multi-Window)</span>
+                                <span class="fw-bold text-info" style="font-size:11px;">🔍 LIVE SCANNER (Filtered)</span>
                                 <span class="badge bg-dark" id="scanner-count">16 Assets</span>
                             </div>
                             <div class="table-responsive" style="max-height: 250px; overflow-y: auto;">
@@ -688,7 +695,7 @@ def api_scan():
             if res:
                 results.append(res)
                 if res['signal'] in ['STRONG LONG', 'STRONG SHORT']:
-                    send_telegram_alert(f"🚨 *Delta Alert*: {res['symbol']} ({res['mode']}) -> *{res['signal']}* @ ${res['price']}")
+                    send_telegram_alert(f"🚨 *Delta Filtered Alert*: {res['symbol']} ({res['mode']}) -> *{res['signal']}* @ ${res['price']}")
     return jsonify(results)
 
 @app.route('/api/config', methods=['GET', 'POST'])
