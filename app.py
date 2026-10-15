@@ -15,13 +15,7 @@ CONFIG_FILE = os.path.join(BASE_DIR, "broker_config.json")
 STATE_FILE = os.path.join(BASE_DIR, "trade_state.json")
 JOURNAL_FILE = os.path.join(BASE_DIR, "trade_journal.json")
 
-# Top 20 Watchlist (Futures for execution, Spot for HTF Daily trend)
-FUTURES_WATCHLIST = [
-    'BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'BNBUSD',
-    'DOGEUSD', 'SUIUSD', 'LINKUSD', 'AVAXUSD', 'NEARUSD',
-    'ADAUSD', 'DOTUSD', 'TONUSD', 'PEPEUSD', 'RENDERUSD',
-    'GOLD', 'SILVER', 'CRUDE', 'NATGAS', 'COPPER'
-]
+FUTURES_WATCHLIST = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'GOLD', 'CRUDE']
 USDT_INR_RATE = 88.0
 
 MARKET_CACHE = {}
@@ -98,12 +92,31 @@ def send_telegram_alert(message):
     except Exception:
         pass
 
+def fetch_delta_wallet_balance():
+    cfg = load_config()
+    api_key, api_secret = cfg.get("api_key", "").strip(), cfg.get("api_secret", "").strip()
+    if not api_key or not api_secret:
+        return {"balance_usd": 113.63, "balance_inr": 10000}
+    try:
+        timestamp = int(time.time())
+        endpoint = "/v2/wallet/balances"
+        signature = hmac.new(api_secret.encode(), f"GET{timestamp}{endpoint}".encode(), hashlib.sha256).hexdigest()
+        headers = {"api-key": api_key, "signature": signature, "timestamp": str(timestamp)}
+        res = requests.get("https://api.india.delta.exchange" + endpoint, headers=headers, timeout=4)
+        if res.status_code == 200:
+            wallets = res.json().get("result", [])
+            for w in wallets:
+                if w.get("asset_symbol") in ["USDT", "USD"]:
+                    bal = float(w.get("balance", 0))
+                    return {"balance_usd": bal, "balance_inr": round(bal * USDT_INR_RATE, 2)}
+    except Exception:
+        pass
+    return {"balance_usd": 0.0, "balance_inr": 0.0}
+
 def fetch_binance_spot_candles(symbol, resolution, limit=35):
-    """Daily Trend check mate Binance Spot API no upyog (Authentic Trend)"""
-    spot_sym = symbol.replace('USD', 'USDT')
-    if symbol in ['GOLD', 'SILVER', 'CRUDE', 'NATGAS', 'COPPER']:
-        return fetch_delta_candles(symbol, resolution, limit) # Commodities mate Delta j use thashe
-    
+    spot_sym = symbol if 'USDT' in symbol else symbol.replace('USD', 'USDT')
+    if 'GOLD' in symbol or 'CRUDE' in symbol:
+        spot_sym = symbol
     url = f"https://api.binance.com/api/v3/klines?symbol={spot_sym}&interval={resolution}&limit={limit}"
     try:
         res = requests.get(url, timeout=3.0)
@@ -115,10 +128,9 @@ def fetch_binance_spot_candles(symbol, resolution, limit=35):
             return candles
     except Exception:
         pass
-    return fetch_delta_candles(symbol, resolution, limit)
+    return []
 
 def fetch_delta_candles(symbol, resolution, limit=35):
-    """Futures Execution mate Delta Exchange API"""
     cache_key = f"{symbol}_{resolution}"
     now = int(time.time())
     if cache_key in MARKET_CACHE and (now - MARKET_CACHE[cache_key]['ts'] < CACHE_TTL):
@@ -151,7 +163,7 @@ def fetch_delta_candles(symbol, resolution, limit=35):
                     return final_data
         except Exception:
             continue
-    return None
+    return []
 
 def calculate_rsi_series(closes, period=14):
     rsis = [50.0] * len(closes)
@@ -191,7 +203,6 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
     htf_tf = '1d' if mode == 'swing' else '1h'
     ltf_tf = '1h' if mode == 'swing' else '15m'
 
-    # HTF (Daily Trend) from Spot, LTF (Entry) from Futures
     htf_raw = fetch_binance_spot_candles(sym, htf_tf, 30)
     ltf_raw = fetch_delta_candles(sym, ltf_tf, 30)
     if not htf_raw or not ltf_raw: return None
@@ -237,19 +248,18 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
         target_price = round(curr_price - (per_unit_risk * rr_ratio), 4)
 
     pos_val_inr = calc_qty * curr_price * USDT_INR_RATE
-    margin_inr = round(pos_val_inr / max(1.0, leverage))
-
+    clean_name = sym.replace('USDT', '').replace('USD', '')
     return {
-        'symbol': sym + '.P', 'clean_sym': sym, 'mode': mode.upper(),
+        'symbol': clean_name + 'USDT', 'clean_sym': sym, 'mode': mode.upper(),
         'price': curr_price, 'htf_rsi': round(htf_rsi, 2), 'ltf_rsi': round(ltf_rsi, 2),
         'kc_u': round(ltf_kcu[-1], 4), 'kc_l': round(ltf_kcl[-1], 4), 'vol': recent_vol,
-        'signal': signal, 'sl': sl_price, 'target': target_price, 'lot_size': calc_qty, 'margin_inr': margin_inr
+        'signal': signal, 'sl': sl_price, 'target': target_price, 'lot_size': calc_qty, 'margin_inr': round(pos_val_inr / max(1.0, leverage))
     }
 
 def execute_broker_order(symbol, side, size):
     cfg = load_config()
     api_key, api_secret = cfg.get("api_key", "").strip(), cfg.get("api_secret", "").strip()
-    if not api_key or not api_secret: return {"status": "simulated", "message": "Demo Mode: Simulated Futures Trade Placed!"}
+    if not api_key or not api_secret: return {"status": "simulated", "message": "Demo Mode: Simulated Trade Placed!"}
     try:
         timestamp = int(time.time())
         endpoint = "/v2/orders"
@@ -258,7 +268,7 @@ def execute_broker_order(symbol, side, size):
         signature = hmac.new(api_secret.encode(), f"POST{timestamp}{endpoint}{payload}".encode(), hashlib.sha256).hexdigest()
         headers = {"api-key": api_key, "signature": signature, "timestamp": str(timestamp), "Content-Type": "application/json"}
         res = requests.post("https://api.india.delta.exchange" + endpoint, data=payload, headers=headers, timeout=4)
-        return {"status": "success", "message": f"Delta Futures Order Executed: {res.text}"}
+        return {"status": "success", "message": f"Delta Order Executed: {res.text}"}
     except Exception as e:
         return {"status": "error", "message": f"Delta Error: {str(e)}"}
 
@@ -268,10 +278,10 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pro Hybrid Terminal (Spot HTF + Futures LTF)</title>
+    <title>Pro Trading Terminal with Binance Charts</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+    <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
     <style>
         body { background-color: #070b14; color: #f1f5f9; font-family: 'Inter', sans-serif; font-size: 13px; }
         .card-custom { background-color: #111827; border: 1px solid #1f2937; border-radius: 8px; }
@@ -279,8 +289,7 @@ HTML_TEMPLATE = """
         .badge-long { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #10b981; font-weight: 700; }
         .badge-short { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; font-weight: 700; }
         .coin-link { cursor: pointer; color: #38bdf8; font-weight: bold; text-decoration: underline; }
-        .chart-box { height: 260px; width: 100%; }
-        .rsi-box { height: 90px; width: 100%; border-top: 1px solid #1f2937; }
+        .tv-chart-box { height: 380px; width: 100%; border-radius: 6px; overflow: hidden; }
         .modal-content { background-color: #111827; color: #fff; border: 1px solid #374151; }
         .form-control, .form-select { background-color: #070b14; border: 1px solid #374151; color: #fff; }
     </style>
@@ -289,10 +298,10 @@ HTML_TEMPLATE = """
     <div class="container-fluid">
         <div class="card-custom p-2 px-3 mb-2 d-flex flex-wrap justify-content-between align-items-center">
             <div class="d-flex align-items-center gap-3">
-                <h5 class="fw-bold text-info mb-0">⚡ HYBRID TERMINAL (SPOT HTF + FUTURES LTF)</h5>
+                <h5 class="fw-bold text-info mb-0">⚡ BINANCE DUAL-CHART TERMINAL</h5>
                 <div class="btn-group btn-group-sm">
-                    <button class="btn btn-outline-info active" id="mode-swing" onclick="switchMode('swing')">Swing (Spot 1D + Fut 1H)</button>
-                    <button class="btn btn-outline-info" id="mode-intraday" onclick="switchMode('intraday')">Intraday (Spot 1H + Fut 15m)</button>
+                    <button class="btn btn-outline-info active" id="mode-swing" onclick="switchMode('swing')">Swing (1D+1H)</button>
+                    <button class="btn btn-outline-info" id="mode-intraday" onclick="switchMode('intraday')">Intraday (1H+15m)</button>
                 </div>
             </div>
             <div class="d-flex align-items-center gap-3">
@@ -307,47 +316,46 @@ HTML_TEMPLATE = """
 
         <div id="active-trade-container" class="mb-2 d-none">
             <div class="p-2 px-3 rounded d-flex justify-content-between align-items-center" style="background: rgba(16,185,129,0.15); border: 1px solid #10b981;">
-                <div><span class="badge bg-success me-2">LIVE FUTURES POSITION</span><span class="fw-bold text-white" id="at-details">...</span></div>
+                <div><span class="badge bg-success me-2">LIVE POSITION</span><span class="fw-bold text-white" id="at-details">...</span></div>
                 <div><span class="fw-bold fs-6 me-3 text-success" id="live-pnl-display">P&L: $0.00</span><button class="btn btn-sm btn-danger fw-bold py-0" onclick="closeActiveTrade()">Exit Position</button></div>
             </div>
         </div>
 
+        <!-- TRADINGVIEW BINANCE DUAL CHARTS -->
         <div class="row g-2 mb-2">
             <div class="col-md-6">
                 <div class="card-custom p-2">
                     <div class="d-flex justify-content-between align-items-center px-1 mb-1">
-                        <span class="fw-bold text-warning" id="chart1-title">Chart 1: Spot HTF Trend</span>
-                        <span class="badge bg-secondary" id="active-symbol-1">BTCUSD.P</span>
+                        <span class="fw-bold text-warning" id="chart1-title">HTF Chart (Binance)</span>
+                        <span class="badge bg-secondary" id="active-symbol-1">BINANCE:BTCUSDT</span>
                     </div>
-                    <div id="chart-1" class="chart-box"></div>
-                    <div id="rsi-1" class="rsi-box"></div>
+                    <div id="tv-chart-1" class="tv-chart-box"></div>
                 </div>
             </div>
             <div class="col-md-6">
                 <div class="card-custom p-2">
                     <div class="d-flex justify-content-between align-items-center px-1 mb-1">
-                        <span class="fw-bold text-info" id="chart2-title">Chart 2: Futures LTF Entry</span>
-                        <span class="badge bg-secondary" id="active-symbol-2">BTCUSD.P</span>
+                        <span class="fw-bold text-info" id="chart2-title">LTF Chart (Binance)</span>
+                        <span class="badge bg-secondary" id="active-symbol-2">BINANCE:BTCUSDT</span>
                     </div>
-                    <div id="chart-2" class="chart-box"></div>
-                    <div id="rsi-2" class="rsi-box"></div>
+                    <div id="tv-chart-2" class="tv-chart-box"></div>
                 </div>
             </div>
         </div>
 
         <div class="card-custom p-2">
             <div class="d-flex justify-content-between align-items-center px-2 mb-2">
-                <span class="fw-bold text-info">📋 HYBRID FUTURES SCANNER (Spot Trend + Futures Execution)</span>
+                <span class="fw-bold text-info">📋 LIVE FUTURES SCANNER (Click symbol to load Binance Charts)</span>
                 <span class="small text-secondary">Capital: <b class="text-white" id="lbl-capital">₹10,000</b> | Risk: <b class="text-danger" id="lbl-risk">₹500</b></span>
             </div>
-            <div class="table-responsive" style="max-height: 350px; overflow-y: auto;">
+            <div class="table-responsive">
                 <table class="table table-dark table-hover align-middle mb-0">
                     <thead>
                         <tr class="text-secondary small">
                             <th>Contract</th>
-                            <th>Futures Price</th>
-                            <th id="th-htf">Spot HTF RSI</th>
-                            <th id="th-ltf">Futures LTF RSI</th>
+                            <th>Price</th>
+                            <th id="th-htf">HTF RSI</th>
+                            <th id="th-ltf">LTF RSI</th>
                             <th>KC Bands (Low / Up)</th>
                             <th>Vol</th>
                             <th>Signal</th>
@@ -359,7 +367,7 @@ HTML_TEMPLATE = """
                         </tr>
                     </thead>
                     <tbody id="scanner-table">
-                        <tr><td colspan="12" class="text-center py-3 text-info">Scanning Hybrid Feeds...</td></tr>
+                        <tr><td colspan="12" class="text-center py-3 text-info">Loading Scanner...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -398,62 +406,69 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <div class="modal fade" id="botModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header border-secondary"><h6 class="modal-title fw-bold text-info">🤖 Telegram Bot</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-2"><label class="form-label small">Bot Token</label><input type="text" class="form-control" id="cfg-tg-token"></div><div class="mb-2"><label class="form-label small">Chat ID</label><input type="text" class="form-control" id="cfg-tg-chat"></div></div><div class="modal-footer border-secondary"><button type="button" class="btn btn-primary w-100 fw-bold" onclick="saveBotSettings()">Save</button></div></div></div></div>
+    <div class="modal fade" id="botModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header border-secondary"><h6 class="modal-title fw-bold text-info">🤖 Telegram Bot</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-2"><label class="form-label small">Bot Token</label><input type="text" class="form-control" id="cfg-tg-token"></div><div class="mb-2"><label class="form-label small">Chat ID</label><input type="text" class="form-control" id="cfg-tg-chat" value="7687426054"></div></div><div class="modal-footer border-secondary"><button type="button" class="btn btn-primary w-100 fw-bold" onclick="saveBotSettings()">Save</button></div></div></div></div>
     <div class="modal fade" id="settingsModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header border-secondary"><h6 class="modal-title fw-bold text-info">⚙ Setup</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="row g-2 mb-2"><div class="col-6"><label class="form-label small">KC Length</label><input type="number" class="form-control" id="cfg-kcl" value="20"></div><div class="col-6"><label class="form-label small">KC Mult</label><input type="number" step="0.1" class="form-control" id="cfg-kcm" value="1.0"></div><div class="col-6"><label class="form-label small">Capital (₹)</label><input type="number" class="form-control" id="cfg-capital" value="10000"></div><div class="col-6"><label class="form-label small">Risk (₹)</label><input type="number" class="form-control" id="cfg-risk" value="500"></div><div class="col-6"><label class="form-label small">Leverage</label><input type="number" class="form-control" id="cfg-lev" value="5"></div><div class="col-6"><label class="form-label small">R:R</label><select class="form-select" id="cfg-rr"><option value="2.0">1 : 2</option></select></div></div><div class="mb-2"><label class="form-label small">Delta API Key</label><input type="text" class="form-control" id="cfg-api-key"></div><div class="mb-2"><label class="form-label small">Delta API Secret</label><input type="password" class="form-control" id="cfg-api-secret"></div></div><div class="modal-footer border-secondary"><button type="button" class="btn btn-info w-100 fw-bold" onclick="saveSettings()">Save</button></div></div></div></div>
 
     <script>
-        let currentSymbol = 'BTCUSD';
+        let currentSymbol = 'BTCUSDT';
         let currentMode = 'swing';
         let hasActiveTrade = false;
         let autoTradeEnabled = false;
         let latestScanMap = {};
-        let c1, s1, u1, m1, l1, r1, rs1;
-        let c2, s2, u2, m2, l2, r2, rs2;
+        let tvWidget1 = null, tvWidget2 = null;
 
-        function initCharts() {
-            c1 = LightweightCharts.createChart(document.getElementById('chart-1'), { layout: { background: { color: '#111827' }, textColor: '#9ca3af' }, grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } } });
-            s1 = c1.addCandlestickSeries({ upColor: '#10b981', downColor: '#ef4444' });
-            u1 = c1.addLineSeries({ color: '#00f2fe', lineWidth: 2 }); m1 = c1.addLineSeries({ color: '#f59e0b', lineWidth: 1, lineStyle: 2 }); l1 = c1.addLineSeries({ color: '#00f2fe', lineWidth: 2 });
-            r1 = LightweightCharts.createChart(document.getElementById('rsi-1'), { layout: { background: { color: '#111827' }, textColor: '#9ca3af' }, grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } }, timeScale: { visible: false } });
-            rs1 = r1.addLineSeries({ color: '#a855f7', lineWidth: 2 });
-            rs1.createPriceLine({ price: 60.5, color: '#10b981', lineWidth: 1, lineStyle: 2 });
-            rs1.createPriceLine({ price: 40.5, color: '#ef4444', lineWidth: 1, lineStyle: 2 });
-
-            c2 = LightweightCharts.createChart(document.getElementById('chart-2'), { layout: { background: { color: '#111827' }, textColor: '#9ca3af' }, grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } } });
-            s2 = c2.addCandlestickSeries({ upColor: '#10b981', downColor: '#ef4444' });
-            u2 = c2.addLineSeries({ color: '#00f2fe', lineWidth: 2 }); m2 = c2.addLineSeries({ color: '#f59e0b', lineWidth: 1, lineStyle: 2 }); l2 = c2.addLineSeries({ color: '#00f2fe', lineWidth: 2 });
-            r2 = LightweightCharts.createChart(document.getElementById('rsi-2'), { layout: { background: { color: '#111827' }, textColor: '#9ca3af' }, grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } }, timeScale: { visible: false } });
-            rs2 = r2.addLineSeries({ color: '#a855f7', lineWidth: 2 });
-            rs2.createPriceLine({ price: 60.5, color: '#10b981', lineWidth: 1, lineStyle: 2 });
-            rs2.createPriceLine({ price: 40.5, color: '#ef4444', lineWidth: 1, lineStyle: 2 });
-
-            c1.timeScale().subscribeVisibleLogicalRangeChange(range => { if(range) r1.timeScale().setVisibleLogicalRange(range); });
-            c2.timeScale().subscribeVisibleLogicalRangeChange(range => { if(range) r2.timeScale().setVisibleLogicalRange(range); });
-        }
-
-        async function loadDualCharts(sym) {
+        function loadTradingViewDualCharts(sym) {
             currentSymbol = sym;
-            document.getElementById('active-symbol-1').innerText = sym + ' (Spot)';
-            document.getElementById('active-symbol-2').innerText = sym + '.P (Futures)';
-            const htf = currentMode === 'swing' ? '1d' : '1h';
-            const ltf = currentMode === 'swing' ? '1h' : '15m';
+            let binanceSym = "BINANCE:" + sym;
+            if (sym === 'GOLD') binanceSym = "OANDA:XAUUSD";
+            else if (sym === 'CRUDE') binanceSym = "TVC:USOIL";
 
-            try {
-                const res1 = await fetch(`/api/spot_chart/${sym}/${htf}`);
-                const d1 = await res1.json();
-                if (d1.candles) { s1.setData(d1.candles); u1.setData(d1.kc_upper); m1.setData(d1.kc_mid); l1.setData(d1.kc_lower); rs1.setData(d1.rsi); }
+            document.getElementById('active-symbol-1').innerText = binanceSym;
+            document.getElementById('active-symbol-2').innerText = binanceSym;
 
-                const res2 = await fetch(`/api/chart/${sym}/${ltf}`);
-                const d2 = await res2.json();
-                if (d2.candles) { s2.setData(d2.candles); u2.setData(d2.kc_upper); m2.setData(d2.kc_mid); l2.setData(d2.kc_lower); rs2.setData(d2.rsi); }
-            } catch(e){}
+            const htfInterval = currentMode === 'swing' ? 'D' : '60';
+            const ltfInterval = currentMode === 'swing' ? '60' : '15';
+
+            document.getElementById('chart1-title').innerText = `HTF Chart (${currentMode === 'swing' ? 'Daily' : '1H'})`;
+            document.getElementById('chart2-title').innerText = `LTF Chart (${currentMode === 'swing' ? '1H' : '15m'})`;
+
+            document.getElementById('tv-chart-1').innerHTML = '';
+            document.getElementById('tv-chart-2').innerHTML = '';
+
+            tvWidget1 = new TradingView.widget({
+                "autosize": true,
+                "symbol": binanceSym,
+                "interval": htfInterval,
+                "timezone": "Asia/Kolkata",
+                "theme": "dark",
+                "style": "1",
+                "locale": "en",
+                "toolbar_bg": "#111827",
+                "enable_publishing": false,
+                "hide_side_toolbar": false,
+                "container_id": "tv-chart-1"
+            });
+
+            tvWidget2 = new TradingView.widget({
+                "autosize": true,
+                "symbol": binanceSym,
+                "interval": ltfInterval,
+                "timezone": "Asia/Kolkata",
+                "theme": "dark",
+                "style": "1",
+                "locale": "en",
+                "toolbar_bg": "#111827",
+                "enable_publishing": false,
+                "hide_side_toolbar": false,
+                "container_id": "tv-chart-2"
+            });
         }
 
         function switchMode(mode) {
             currentMode = mode;
             document.getElementById('mode-swing').classList.toggle('active', mode === 'swing');
             document.getElementById('mode-intraday').classList.toggle('active', mode === 'intraday');
-            loadDualCharts(currentSymbol);
+            loadTradingViewDualCharts(currentSymbol);
             streamScanner();
         }
 
@@ -465,270 +480,4 @@ HTML_TEMPLATE = """
                 btn.className = "btn btn-success btn-sm py-1"; btn.innerText = "Auto: ON";
                 badge.className = "badge bg-success"; badge.innerText = "Auto: ON";
             } else {
-                btn.className = "btn btn-outline-warning btn-sm py-1"; btn.innerText = "Auto Trade";
-                badge.className = "badge bg-success"; badge.innerText = "Auto: OFF";
-            }
-        }
-
-        async function fetchWallet() {
-            try {
-                const res = await fetch('/api/wallet');
-                const d = await res.json();
-                document.getElementById('live-wallet-balance').innerText = `$${d.balance_usd.toFixed(2)} (₹${d.balance_inr.toLocaleString()})`;
-            } catch(e){}
-        }
-
-        async function fetchJournal() {
-            try {
-                const res = await fetch('/api/journal');
-                const list = await res.json();
-                const tbody = document.getElementById('journal-tbody');
-                if (list.length === 0) { tbody.innerHTML = `<tr><td colspan="7" class="text-center text-secondary">No closed trades recorded yet.</td></tr>`; return; }
-                let html = '';
-                list.forEach(j => {
-                    const col = j.pnl >= 0 ? 'text-success' : 'text-danger';
-                    html += `<tr><td>${j.exit_time}</td><td><b>${j.symbol}</b></td><td>${j.side}</td><td>${j.qty}</td><td>$${j.entry}</td><td>$${j.exit}</td><td class="fw-bold ${col}">$${j.pnl.toFixed(2)} (₹${Math.round(j.pnl*88)})</td></tr>`;
-                });
-                tbody.innerHTML = html;
-            } catch(e){}
-        }
-
-        async function fetchConfig() {
-            const res = await fetch('/api/config');
-            const d = await res.json();
-            document.getElementById('lbl-capital').innerText = "₹" + (d.capital_inr || 10000).toLocaleString();
-            document.getElementById('lbl-risk').innerText = "₹" + (d.max_risk_inr || 500).toLocaleString();
-            document.getElementById('cfg-capital').value = d.capital_inr || 10000;
-            document.getElementById('cfg-risk').value = d.max_risk_inr || 500;
-            document.getElementById('cfg-lev').value = Math.max(5, d.leverage || 5);
-            document.getElementById('cfg-kcl').value = d.kc_length || 20;
-            document.getElementById('cfg-kcm').value = d.kc_mult || 1.0;
-            document.getElementById('cfg-tg-token').value = d.telegram_token || '';
-            document.getElementById('cfg-tg-chat').value = d.telegram_chat_id || '7687426054';
-            document.getElementById('cfg-api-key').value = d.api_key || '';
-            document.getElementById('cfg-api-secret').value = d.api_secret || '';
-        }
-
-        async function saveBotSettings() {
-            await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ telegram_token: document.getElementById('cfg-tg-token').value, telegram_chat_id: document.getElementById('cfg-tg-chat').value }) });
-            alert('Bot Saved!'); bootstrap.Modal.getInstance(document.getElementById('botModal')).hide();
-        }
-
-        async function saveSettings() {
-            const payload = {
-                capital_inr: Number(document.getElementById('cfg-capital').value),
-                max_risk_inr: Number(document.getElementById('cfg-risk').value),
-                leverage: Math.max(5, Number(document.getElementById('cfg-lev').value)),
-                kc_length: Number(document.getElementById('cfg-kcl').value),
-                kc_mult: Number(document.getElementById('cfg-kcm').value),
-                api_key: document.getElementById('cfg-api-key').value,
-                api_secret: document.getElementById('cfg-api-secret').value
-            };
-            await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-            fetchConfig(); streamScanner(); alert('Saved!'); bootstrap.Modal.getInstance(document.getElementById('settingsModal')).hide();
-        }
-
-        async function checkTradeState() {
-            const res = await fetch('/api/trade_state');
-            const d = await res.json();
-            const box = document.getElementById('active-trade-container');
-            if (d.active_trade) {
-                hasActiveTrade = true; box.classList.remove('d-none');
-                const t = d.active_trade;
-                document.getElementById('at-details').innerText = `${t.symbol} | ${t.side} | Lot: ${t.qty} | SL: $${t.sl}`;
-                const currP = latestScanMap[t.clean_sym]?.price || t.entry_price;
-                const diff = t.side === 'BUY' ? (currP - t.entry_price) : (t.entry_price - currP);
-                const pnlUsd = diff * t.qty;
-                document.getElementById('live-pnl-display').innerText = `P&L: $${pnlUsd.toFixed(2)} (₹${Math.round(pnlUsd*88)})`;
-            } else { hasActiveTrade = false; box.classList.add('d-none'); }
-        }
-
-        async function closeActiveTrade() { await fetch('/api/close_active_trade', { method: 'POST' }); checkTradeState(); fetchJournal(); alert('Trade exited and saved to Journal!'); }
-        async function placeOrder(sym, side, qty, sl, target) {
-            if (hasActiveTrade) { alert("1-Trade Lock Active!"); return; }
-            const res = await fetch('/api/order', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ symbol: sym, side: side, qty: qty, sl: sl, target: target }) });
-            const d = await res.json(); alert(d.message); checkTradeState();
-        }
-
-        async function streamScanner() {
-            try {
-                const res = await fetch(`/api/scan?mode=${currentMode}`);
-                const data = await res.json();
-                const tbody = document.getElementById('scanner-table');
-                if (!data || data.length === 0) return;
-
-                let html = '';
-                data.forEach(c => {
-                    latestScanMap[c.clean_sym] = c;
-                    let bClass = c.signal === 'STRONG LONG' ? 'badge-long' : (c.signal === 'STRONG SHORT' ? 'badge-short' : 'badge-neutral');
-                    const lock = hasActiveTrade ? 'disabled' : '';
-
-                    if (autoTradeEnabled && !hasActiveTrade && (c.signal === 'STRONG LONG' || c.signal === 'STRONG SHORT')) {
-                        placeOrder(c.clean_sym, c.signal === 'STRONG LONG' ? 'buy' : 'sell', c.lot_size, c.sl, c.target);
-                    }
-
-                    html += `
-                        <tr>
-                            <td class="coin-link" onclick="loadDualCharts('${c.clean_sym}')">${c.symbol}</td>
-                            <td class="fw-bold">$${c.price}</td>
-                            <td>${c.htf_rsi}</td>
-                            <td>${c.ltf_rsi}</td>
-                            <td class="text-info">${c.kc_l} / ${c.kc_u}</td>
-                            <td>${c.vol}</td>
-                            <td><span class="${bClass}">${c.signal}</span></td>
-                            <td class="text-danger">$${c.sl}</td>
-                            <td class="text-success">$${c.target}</td>
-                            <td class="fw-bold text-warning">${c.lot_size}</td>
-                            <td class="text-secondary">₹${c.margin_inr}</td>
-                            <td>
-                                <button class="btn btn-sm btn-success py-0 px-2" ${lock} onclick="placeOrder('${c.clean_sym}','buy','${c.lot_size}','${c.sl}','${c.target}')">L</button>
-                                <button class="btn btn-sm btn-danger py-0 px-2 ms-1" ${lock} onclick="placeOrder('${c.clean_sym}','sell','${c.lot_size}','${c.sl}','${c.target}')">S</button>
-                            </td>
-                        </tr>
-                    `;
-                });
-                tbody.innerHTML = html;
-                document.getElementById('last-tick').innerText = "Live (2s): " + new Date().toLocaleTimeString();
-            } catch(e){}
-        }
-
-        initCharts(); fetchConfig(); checkTradeState(); fetchWallet(); fetchJournal();
-        streamScanner().then(() => loadDualCharts('BTCUSD'));
-        setInterval(() => { streamScanner(); checkTradeState(); fetchWallet(); }, 2000);
-    </script>
-</body>
-</html>
-"""
-
-@app.route('/')
-def home():
-    return render_template_string(HTML_TEMPLATE)
-
-@app.route('/api/wallet')
-def api_wallet():
-    return jsonify(fetch_delta_wallet_balance())
-
-@app.route('/api/journal')
-def api_journal():
-    return jsonify(load_journal())
-
-@app.route('/api/spot_chart/<symbol>/<interval>')
-def api_spot_chart(symbol, interval):
-    cfg = load_config()
-    raw = fetch_binance_spot_candles(symbol, interval, limit=35)
-    if not raw: return jsonify({"error": "No data"})
-    times = [int(k['time']) for k in raw]
-    closes = [float(k['close']) for k in raw]
-    highs = [float(k['high']) for k in raw]
-    lows = [float(k['low']) for k in raw]
-    kc_u, kc_m, kc_l = calculate_keltner_series(closes, highs, lows, int(cfg.get("kc_length", 20)), float(cfg.get("kc_mult", 1.0)))
-    rsis = calculate_rsi_series(closes, 14)
-    candles, u_b, m_b, l_b, r_d = [], [], [], [], []
-    for i in range(len(times)):
-        candles.append({"time": times[i], "open": float(raw[i]['open']), "high": highs[i], "low": lows[i], "close": closes[i]})
-        u_b.append({"time": times[i], "value": round(kc_u[i], 4)})
-        m_b.append({"time": times[i], "value": round(kc_m[i], 4)})
-        l_b.append({"time": times[i], "value": round(kc_l[i], 4)})
-        r_d.append({"time": times[i], "value": round(rsis[i], 2)})
-    return jsonify({"candles": candles, "kc_upper": u_b, "kc_mid": m_b, "kc_lower": l_b, "rsi": r_d})
-
-@app.route('/api/chart/<symbol>/<interval>')
-def api_chart(symbol, interval):
-    cfg = load_config()
-    raw = fetch_delta_candles(symbol, interval, limit=35)
-    if not raw: return jsonify({"error": "No data"})
-    times = [int(k['time']) for k in raw]
-    closes = [float(k['close']) for k in raw]
-    highs = [float(k['high']) for k in raw]
-    lows = [float(k['low']) for k in raw]
-    kc_u, kc_m, kc_l = calculate_keltner_series(closes, highs, lows, int(cfg.get("kc_length", 20)), float(cfg.get("kc_mult", 1.0)))
-    rsis = calculate_rsi_series(closes, 14)
-    candles, u_b, m_b, l_b, r_d = [], [], [], [], []
-    for i in range(len(times)):
-        candles.append({"time": times[i], "open": float(raw[i]['open']), "high": highs[i], "low": lows[i], "close": closes[i]})
-        u_b.append({"time": times[i], "value": round(kc_u[i], 4)})
-        m_b.append({"time": times[i], "value": round(kc_m[i], 4)})
-        l_b.append({"time": times[i], "value": round(kc_l[i], 4)})
-        r_d.append({"time": times[i], "value": round(rsis[i], 2)})
-    return jsonify({"candles": candles, "kc_upper": u_b, "kc_mid": m_b, "kc_lower": l_b, "rsi": r_d})
-
-@app.route('/api/scan')
-def api_scan():
-    mode = request.args.get('mode', 'swing').lower()
-    now = time.time()
-    if SCAN_CACHE[mode]["data"] and (now - SCAN_CACHE[mode]["ts"] < 10):
-        return jsonify(SCAN_CACHE[mode]["data"])
-
-    cfg = load_config()
-    results = []
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(analyze_single_coin, sym, mode, float(cfg.get("max_risk_inr", 500))/USDT_INR_RATE, float(cfg.get("rr_ratio", 2.0)), max(5.0, float(cfg.get("leverage", 5.0))), int(cfg.get("kc_length", 20)), float(cfg.get("kc_mult", 1.0))) for sym in FUTURES_WATCHLIST]
-        for f in futures:
-            res = f.result()
-            if res:
-                results.append(res)
-                if res['signal'] in ['STRONG LONG', 'STRONG SHORT']:
-                    send_telegram_alert(f"🚨 *Hybrid Alert*: {res['symbol']} ({res['mode']}) -> *{res['signal']}* @ ${res['price']}")
-    
-    SCAN_CACHE[mode] = {"ts": now, "data": results}
-    return jsonify(results)
-
-@app.route('/api/config', methods=['GET', 'POST'])
-def handle_config():
-    if request.method == 'POST':
-        old_cfg = load_config()
-        new_cfg = request.json
-        for k, v in new_cfg.items():
-            if v is not None and v != "":
-                if k == "api_secret" and "****" in str(v): continue
-                old_cfg[k] = v
-        save_config(old_cfg)
-        return jsonify({"status": "saved"})
-    cfg = load_config()
-    masked = dict(cfg)
-    if masked.get("api_secret"): masked["api_secret"] = "****"
-    return jsonify(masked)
-
-@app.route('/api/trade_state', methods=['GET'])
-def get_trade_state(): return jsonify(load_trade_state())
-
-@app.route('/api/close_active_trade', methods=['POST'])
-def close_trade():
-    state = load_trade_state()
-    if state.get("active_trade"):
-        t = state["active_trade"]
-        candles = fetch_delta_candles(t['clean_sym'], '1h', 5)
-        exit_price = float(candles[-1]['close']) if candles else t['entry_price']
-        diff = exit_price - t['entry_price'] if t['side'] == 'BUY' else t['entry_price'] - exit_price
-        pnl_usd = diff * t['qty']
-        
-        journal_entry = {
-            "symbol": t['symbol'],
-            "side": t['side'],
-            "qty": t['qty'],
-            "entry": t['entry_price'],
-            "exit": exit_price,
-            "pnl": pnl_usd,
-            "exit_time": time.strftime("%Y-%m-%d %H:%M:%S")
-        }
-        save_to_journal(journal_entry)
-        save_trade_state({"active_trade": None})
-    return jsonify({"status": "trade_cleared"})
-
-@app.route('/api/order', methods=['POST'])
-def execute_order():
-    state = load_trade_state()
-    if state.get("active_trade"): return jsonify({"status": "error", "message": "1 Active Trade running!"})
-    data = request.json
-    symbol, side, qty, sl, target = data.get('symbol'), data.get('side'), data.get('qty', 1), data.get('sl'), data.get('target')
-    candles = fetch_delta_candles(symbol, '1h', 5)
-    entry_price = float(candles[-1]['close']) if candles else 0.0
-    broker_res = execute_broker_order(symbol, side, qty)
-    new_trade = {"symbol": symbol + ".P", "clean_sym": symbol, "side": side.upper(), "qty": qty, "entry_price": entry_price, "entry_time": time.strftime("%H:%M:%S"), "sl": sl, "target": target}
-    save_trade_state({"active_trade": new_trade})
-    send_telegram_alert(f"✅ *Futures Hybrid Trade Executed*: {new_trade['side']} {new_trade['symbol']} | Qty: {qty} | Entry: ${entry_price}")
-    return jsonify({"status": "success", "message": broker_res.get("message", "Order Placed!"), "trade": new_trade})
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5050))
-    app.run(host='0.0.0.0', port=port, debug=False)
+                btn.className = "btn btn-outline-warning btn-sm py-1"; btn.innerText = "
