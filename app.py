@@ -49,7 +49,7 @@ def load_config():
         "capital_inr": 10000,
         "max_risk_inr": 500,
         "rr_ratio": 2.0,
-        "leverage": 5  # Minimum 5x default
+        "leverage": 5
     }
 
 def save_config(data):
@@ -69,7 +69,6 @@ def save_trade_state(state):
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f, indent=4)
 
-# --- TELEGRAM NOTIFICATION & BOT SENDER ---
 def send_telegram_alert(message):
     cfg = load_config()
     token = cfg.get("telegram_token", "").strip()
@@ -83,7 +82,6 @@ def send_telegram_alert(message):
     except Exception:
         pass
 
-# --- DELTA EXCHANGE DATA FETCHER ---
 def fetch_delta_candles(symbol, resolution, limit=65):
     cache_key = f"{symbol}_{resolution}"
     now = int(time.time())
@@ -267,7 +265,6 @@ def execute_broker_order(symbol, side, size):
     except Exception as e:
         return {"status": "error", "message": f"Delta Error: {str(e)}"}
 
-# --- FRONTEND TEMPLATE WITH LIVE P&L & AUTO TRADING ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -300,7 +297,6 @@ HTML_TEMPLATE = """
 </head>
 <body class="p-2">
     <div class="container-fluid">
-        <!-- HEADER & MODE SWITCHER -->
         <div class="terminal-card p-2 px-3 mb-2 d-flex flex-wrap justify-content-between align-items-center">
             <div class="d-flex align-items-center gap-3">
                 <h5 class="fw-bold text-info mb-0"><span class="live-dot me-2"></span>DELTA AUTO-TRADING TERMINAL</h5>
@@ -312,12 +308,11 @@ HTML_TEMPLATE = """
             <div class="d-flex align-items-center gap-2 mt-2 mt-md-0">
                 <span class="badge bg-dark border border-secondary text-warning" id="auto-trade-badge">🤖 Auto-Trade: OFF</span>
                 <button class="btn btn-outline-warning btn-sm py-1" onclick="toggleAutoTrade()" id="auto-trade-toggle-btn">Enable Auto-Trade</button>
-                <button class="btn btn-info btn-sm py-1 fw-bold" data-bs-toggle="modal" data-bs-target="#settingsModal">⚙ Bot & API Setup</button>
+                <button class="btn btn-info btn-sm py-1 fw-bold" data-bs-toggle="modal" data-bs-target="#settingsModal">⚙ Complete Terminal Setup</button>
                 <span id="last-tick" class="text-secondary small">Live</span>
             </div>
         </div>
 
-        <!-- ACTIVE TRADE & LIVE P&L BANNER -->
         <div id="active-trade-container" class="mb-2 d-none">
             <div class="p-2 px-3 rounded d-flex justify-content-between align-items-center" style="background: rgba(16,185,129,0.15); border: 1px solid #10b981;">
                 <div>
@@ -331,7 +326,6 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- CHART & MONEY MANAGER -->
         <div class="row g-2 mb-2">
             <div class="col-lg-8">
                 <div class="terminal-card p-2 h-100">
@@ -386,10 +380,9 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- SCANNER TABLE -->
         <div class="terminal-card p-2">
             <div class="d-flex justify-content-between align-items-center px-2 mb-2">
-                <span class="fw-bold text-info" id="scanner-header-title">📈 FUTURES & COMMODITIES SCANNER (Crypto, Gold, Silver, Oil)</span>
+                <span class="fw-bold text-info" id="scanner-header-title">📈 FUTURES & COMMODITIES SCANNER</span>
                 <span class="small text-secondary">Auto Telegram Alerts & One-Click Execution</span>
             </div>
             <div class="table-responsive">
@@ -418,12 +411,12 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- SETTINGS MODAL -->
+    <!-- SETTINGS MODAL WITH ALL CONTROLS -->
     <div class="modal fade" id="settingsModal" tabindex="-1">
         <div class="modal-dialog">
             <div class="modal-content">
                 <div class="modal-header border-secondary">
-                    <h6 class="modal-title fw-bold text-info">⚙ Telegram Bot & Delta API Settings</h6>
+                    <h6 class="modal-title fw-bold text-info">⚙ Complete Terminal Setup</h6>
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
@@ -431,12 +424,8 @@ HTML_TEMPLATE = """
                         <div class="col-6"><label class="form-label small">Capital (₹)</label><input type="number" class="form-control" id="cfg-capital" value="10000"></div>
                         <div class="col-6"><label class="form-label small">Fixed Risk (₹)</label><input type="number" class="form-control" id="cfg-risk" value="500"></div>
                         <div class="col-6">
-                            <label class="form-label small">Leverage (Min 5x)</label>
-                            <select class="form-select" id="cfg-lev">
-                                <option value="5" selected>5x (Minimum Safe)</option>
-                                <option value="10">10x (Intraday)</option>
-                                <option value="20">20x (High)</option>
-                            </select>
+                            <label class="form-label small">Leverage (Min 5x or Manual)</label>
+                            <input type="number" class="form-control" id="cfg-lev" value="5" min="5" max="50">
                         </div>
                         <div class="col-6">
                             <label class="form-label small">Risk:Reward</label>
@@ -444,14 +433,14 @@ HTML_TEMPLATE = """
                         </div>
                     </div>
                     <hr class="border-secondary">
-                    <div class="mb-2"><label class="form-label small text-info">Telegram Bot Token</label><input type="text" class="form-control" id="cfg-tg-token" placeholder="123456:ABC-DEF..."></div>
-                    <div class="mb-2"><label class="form-label small text-info">Telegram Chat ID</label><input type="text" class="form-control" id="cfg-tg-chat" placeholder="@your_channel or chat_id"></div>
+                    <div class="mb-2"><label class="form-label small text-info">Telegram Bot Token</label><input type="text" class="form-control" id="cfg-tg-token" placeholder="8847204764:AAEopmSPVSus..."></div>
+                    <div class="mb-2"><label class="form-label small text-info">Telegram Chat ID</label><input type="text" class="form-control" id="cfg-tg-chat" placeholder="Your Chat ID"></div>
                     <hr class="border-secondary">
                     <div class="mb-2"><label class="form-label small">Delta API Key</label><input type="text" class="form-control" id="cfg-api-key"></div>
                     <div class="mb-2"><label class="form-label small">Delta API Secret</label><input type="password" class="form-control" id="cfg-api-secret"></div>
                 </div>
                 <div class="modal-footer border-secondary">
-                    <button type="button" class="btn btn-info w-100 fw-bold" onclick="saveSettings()">Save & Activate Bot</button>
+                    <button type="button" class="btn btn-info w-100 fw-bold" onclick="saveSettings()">Save All Settings</button>
                 </div>
             </div>
         </div>
@@ -466,7 +455,6 @@ HTML_TEMPLATE = """
         let latestScanMap = {};
         let priceChart, candleSeries, kcUpperSeries, kcMidSeries, kcLowerSeries;
         let rsiChart, rsiSeries;
-        let priceLines = [];
 
         function initCharts() {
             priceChart = LightweightCharts.createChart(document.getElementById('price-chart'), {
@@ -543,10 +531,10 @@ HTML_TEMPLATE = """
             const d = await res.json();
             document.getElementById('lbl-capital').innerText = "₹" + (d.capital_inr || 10000).toLocaleString();
             document.getElementById('lbl-risk').innerText = "₹" + (d.max_risk_inr || 500).toLocaleString();
-            document.getElementById('lbl-lev').value = d.leverage || 5;
+            document.getElementById('lbl-lev').innerText = (d.leverage || 5) + "x Min";
             document.getElementById('cfg-capital').value = d.capital_inr || 10000;
             document.getElementById('cfg-risk').value = d.max_risk_inr || 500;
-            document.getElementById('cfg-lev').value = d.leverage || 5;
+            document.getElementById('cfg-lev').value = Math.max(5, d.leverage || 5);
             document.getElementById('cfg-rr').value = d.rr_ratio || 2.0;
             document.getElementById('cfg-tg-token').value = d.telegram_token || '';
             document.getElementById('cfg-tg-chat').value = d.telegram_chat_id || '';
@@ -558,7 +546,7 @@ HTML_TEMPLATE = """
             const payload = {
                 capital_inr: Number(document.getElementById('cfg-capital').value),
                 max_risk_inr: Number(document.getElementById('cfg-risk').value),
-                leverage: Number(document.getElementById('cfg-lev').value),
+                leverage: Math.max(5, Number(document.getElementById('cfg-lev').value)),
                 rr_ratio: Number(document.getElementById('cfg-rr').value),
                 telegram_token: document.getElementById('cfg-tg-token').value,
                 telegram_chat_id: document.getElementById('cfg-tg-chat').value,
@@ -580,7 +568,6 @@ HTML_TEMPLATE = """
                 const t = d.active_trade;
                 document.getElementById('at-details').innerText = `${t.symbol} | ${t.side} | Lot: ${t.qty} | SL: $${t.sl} | TP: $${t.target}`;
                 
-                // Live P&L Simulation calculation
                 const currP = latestScanMap[t.clean_sym]?.price || t.entry_price;
                 const diff = t.side === 'BUY' ? (currP - t.entry_price) : (t.entry_price - currP);
                 const pnlUsd = diff * t.qty;
@@ -701,7 +688,7 @@ def api_scan():
     cfg = load_config()
     max_risk_inr = float(cfg.get("max_risk_inr", 500))
     rr_ratio = float(cfg.get("rr_ratio", 2.0))
-    leverage = max(5.0, float(cfg.get("leverage", 5.0))) # Minimum 5x enforced
+    leverage = max(5.0, float(cfg.get("leverage", 5.0)))
     risk_usdt = max_risk_inr / USDT_INR_RATE
 
     results = []
@@ -742,9 +729,6 @@ def close_trade():
 @app.route('/api/order', methods=['POST'])
 def execute_order():
     state = load_trade_state()
-    if state.get("active_trade"):
-        return jsonify({"status": "error", "message": "1 Active Trade already running!"})
-
     data = request.json
     symbol = data.get('symbol')
     side = data.get('side')
@@ -752,7 +736,6 @@ def execute_order():
     sl = data.get('sl')
     target = data.get('target')
 
-    # Get latest price for entry tracking
     candles = fetch_delta_candles(symbol, '1h', 5)
     entry_price = float(candles[-1]['close']) if candles else 0.0
 
