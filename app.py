@@ -15,7 +15,13 @@ CONFIG_FILE = os.path.join(BASE_DIR, "broker_config.json")
 STATE_FILE = os.path.join(BASE_DIR, "trade_state.json")
 JOURNAL_FILE = os.path.join(BASE_DIR, "trade_journal.json")
 
-FUTURES_WATCHLIST = ['BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'GOLD', 'CRUDE']
+# Top 20 High-Volume Futures & Commodities Watchlist
+FUTURES_WATCHLIST = [
+    'BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'BNBUSD',
+    'DOGEUSD', 'SUIUSD', 'LINKUSD', 'AVAXUSD', 'NEARUSD',
+    'ADAUSD', 'DOTUSD', 'TONUSD', 'PEPEUSD', 'RENDERUSD',
+    'GOLD', 'SILVER', 'CRUDE', 'NATGAS', 'COPPER'
+]
 USDT_INR_RATE = 88.0
 
 MARKET_CACHE = {}
@@ -47,8 +53,7 @@ def load_config():
         "rr_ratio": 2.0,
         "leverage": 5,
         "kc_length": 20,
-        "kc_mult": 1.0,
-        "trailing_enabled": True
+        "kc_mult": 1.0
     }
 
 def save_config(data):
@@ -263,7 +268,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pro Trading Terminal with Smart Trailing SL</title>
+    <title>Pro Trading Terminal - Top 20 Assets</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
@@ -284,7 +289,7 @@ HTML_TEMPLATE = """
     <div class="container-fluid">
         <div class="card-custom p-2 px-3 mb-2 d-flex flex-wrap justify-content-between align-items-center">
             <div class="d-flex align-items-center gap-3">
-                <h5 class="fw-bold text-info mb-0">⚡ DELTA TERMINAL (SMART TRAILING SL)</h5>
+                <h5 class="fw-bold text-info mb-0">⚡ DELTA TERMINAL (TOP 20 ASSETS)</h5>
                 <div class="btn-group btn-group-sm">
                     <button class="btn btn-outline-info active" id="mode-swing" onclick="switchMode('swing')">Swing (1D+1H)</button>
                     <button class="btn btn-outline-info" id="mode-intraday" onclick="switchMode('intraday')">Intraday (1H+15m)</button>
@@ -302,7 +307,7 @@ HTML_TEMPLATE = """
 
         <div id="active-trade-container" class="mb-2 d-none">
             <div class="p-2 px-3 rounded d-flex justify-content-between align-items-center" style="background: rgba(16,185,129,0.15); border: 1px solid #10b981;">
-                <div><span class="badge bg-success me-2">LIVE POSITION (TRAILING TSL)</span><span class="fw-bold text-white" id="at-details">...</span></div>
+                <div><span class="badge bg-success me-2">LIVE POSITION</span><span class="fw-bold text-white" id="at-details">...</span></div>
                 <div><span class="fw-bold fs-6 me-3 text-success" id="live-pnl-display">P&L: $0.00</span><button class="btn btn-sm btn-danger fw-bold py-0" onclick="closeActiveTrade()">Exit Position</button></div>
             </div>
         </div>
@@ -332,17 +337,17 @@ HTML_TEMPLATE = """
 
         <div class="card-custom p-2">
             <div class="d-flex justify-content-between align-items-center px-2 mb-2">
-                <span class="fw-bold text-info">📋 LIVE FUTURES & COMMODITIES SCANNER</span>
+                <span class="fw-bold text-info">📋 TOP 20 FUTURES & COMMODITIES SCANNER</span>
                 <span class="small text-secondary">Capital: <b class="text-white" id="lbl-capital">₹10,000</b> | Risk: <b class="text-danger" id="lbl-risk">₹500</b></span>
             </div>
-            <div class="table-responsive">
+            <div class="table-responsive" style="max-height: 350px; overflow-y: auto;">
                 <table class="table table-dark table-hover align-middle mb-0">
                     <thead>
                         <tr class="text-secondary small">
                             <th>Contract</th>
                             <th>Price</th>
-                            <th>HTF RSI</th>
-                            <th>LTF RSI</th>
+                            <th id="th-htf">HTF RSI</th>
+                            <th id="th-ltf">LTF RSI</th>
                             <th>KC Bands (Low / Up)</th>
                             <th>Vol</th>
                             <th>Signal</th>
@@ -354,7 +359,7 @@ HTML_TEMPLATE = """
                         </tr>
                     </thead>
                     <tbody id="scanner-table">
-                        <tr><td colspan="12" class="text-center py-3 text-info">Loading...</td></tr>
+                        <tr><td colspan="12" class="text-center py-3 text-info">Scanning Top 20 Assets...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -393,7 +398,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <div class="modal fade" id="botModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header border-secondary"><h6 class="modal-title fw-bold text-info">🤖 Telegram Bot</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-2"><label class="form-label small">Bot Token</label><input type="text" class="form-control" id="cfg-tg-token"></div><div class="mb-2"><label class="form-label small">Chat ID</label><input type="text" class="form-control" id="cfg-tg-chat"></div></div><div class="modal-footer border-secondary"><button type="button" class="btn btn-primary w-100 fw-bold" onclick="saveBotSettings()">Save</button></div></div></div></div>
+    <div class="modal fade" id="botModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header border-secondary"><h6 class="modal-title fw-bold text-info">🤖 Telegram Bot</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-2"><label class="form-label small">Bot Token</label><input type="text" class="form-control" id="cfg-tg-token"></div><div class="mb-2"><label class="form-label small">Chat ID</label><input type="text" class="form-control" id="cfg-tg-chat" value="7687426054"></div></div><div class="modal-footer border-secondary"><button type="button" class="btn btn-primary w-100 fw-bold" onclick="saveBotSettings()">Save</button></div></div></div></div>
     <div class="modal fade" id="settingsModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header border-secondary"><h6 class="modal-title fw-bold text-info">⚙ Setup</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="row g-2 mb-2"><div class="col-6"><label class="form-label small">KC Length</label><input type="number" class="form-control" id="cfg-kcl" value="20"></div><div class="col-6"><label class="form-label small">KC Mult</label><input type="number" step="0.1" class="form-control" id="cfg-kcm" value="1.0"></div><div class="col-6"><label class="form-label small">Capital (₹)</label><input type="number" class="form-control" id="cfg-capital" value="10000"></div><div class="col-6"><label class="form-label small">Risk (₹)</label><input type="number" class="form-control" id="cfg-risk" value="500"></div><div class="col-6"><label class="form-label small">Leverage</label><input type="number" class="form-control" id="cfg-lev" value="5"></div><div class="col-6"><label class="form-label small">R:R</label><select class="form-select" id="cfg-rr"><option value="2.0">1 : 2</option></select></div></div><div class="mb-2"><label class="form-label small">Delta API Key</label><input type="text" class="form-control" id="cfg-api-key"></div><div class="mb-2"><label class="form-label small">Delta API Secret</label><input type="password" class="form-control" id="cfg-api-secret"></div></div><div class="modal-footer border-secondary"><button type="button" class="btn btn-info w-100 fw-bold" onclick="saveSettings()">Save</button></div></div></div></div>
 
     <script>
@@ -583,6 +588,7 @@ HTML_TEMPLATE = """
                     `;
                 });
                 tbody.innerHTML = html;
+                document.getElementById('last-tick').innerText = "Live (2s): " + new Date().toLocaleTimeString();
             } catch(e){}
         }
 
@@ -630,12 +636,12 @@ def api_chart(symbol, interval):
 def api_scan():
     mode = request.args.get('mode', 'swing').lower()
     now = time.time()
-    if SCAN_CACHE[mode]["data"] and (now - SCAN_CACHE[mode]["ts"] < 5):
+    if SCAN_CACHE[mode]["data"] and (now - SCAN_CACHE[mode]["ts"] < 10):
         return jsonify(SCAN_CACHE[mode]["data"])
 
     cfg = load_config()
     results = []
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=8) as executor:
         futures = [executor.submit(analyze_single_coin, sym, mode, float(cfg.get("max_risk_inr", 500))/USDT_INR_RATE, float(cfg.get("rr_ratio", 2.0)), max(5.0, float(cfg.get("leverage", 5.0))), int(cfg.get("kc_length", 20)), float(cfg.get("kc_mult", 1.0))) for sym in FUTURES_WATCHLIST]
         for f in futures:
             res = f.result()
@@ -673,8 +679,6 @@ def close_trade():
         t = state["active_trade"]
         candles = fetch_delta_candles(t['clean_sym'], '1h', 5)
         exit_price = float(candles[-1]['close']) if candles else t['entry_price']
-        
-        # Smart Trailing Check & P&L calculation
         diff = exit_price - t['entry_price'] if t['side'] == 'BUY' else t['entry_price'] - exit_price
         pnl_usd = diff * t['qty']
         
@@ -706,5 +710,5 @@ def execute_order():
     return jsonify({"status": "success", "message": broker_res.get("message", "Order Placed!"), "trade": new_trade})
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5050) if "PORT" in os.environ else 5050)
+    port = int(os.environ.get("PORT", 5050))
     app.run(host='0.0.0.0', port=port, debug=False)
