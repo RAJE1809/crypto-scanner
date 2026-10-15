@@ -15,7 +15,7 @@ CONFIG_FILE = os.path.join(BASE_DIR, "broker_config.json")
 STATE_FILE = os.path.join(BASE_DIR, "trade_state.json")
 JOURNAL_FILE = os.path.join(BASE_DIR, "trade_journal.json")
 
-# Top 20 High-Volume Futures & Commodities Watchlist
+# Top 20 Watchlist (Futures for execution, Spot for HTF Daily trend)
 FUTURES_WATCHLIST = [
     'BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'BNBUSD',
     'DOGEUSD', 'SUIUSD', 'LINKUSD', 'AVAXUSD', 'NEARUSD',
@@ -98,28 +98,27 @@ def send_telegram_alert(message):
     except Exception:
         pass
 
-def fetch_delta_wallet_balance():
-    cfg = load_config()
-    api_key, api_secret = cfg.get("api_key", "").strip(), cfg.get("api_secret", "").strip()
-    if not api_key or not api_secret:
-        return {"balance_usd": 113.63, "balance_inr": 10000}
+def fetch_binance_spot_candles(symbol, resolution, limit=35):
+    """Daily Trend check mate Binance Spot API no upyog (Authentic Trend)"""
+    spot_sym = symbol.replace('USD', 'USDT')
+    if symbol in ['GOLD', 'SILVER', 'CRUDE', 'NATGAS', 'COPPER']:
+        return fetch_delta_candles(symbol, resolution, limit) # Commodities mate Delta j use thashe
+    
+    url = f"https://api.binance.com/api/v3/klines?symbol={spot_sym}&interval={resolution}&limit={limit}"
     try:
-        timestamp = int(time.time())
-        endpoint = "/v2/wallet/balances"
-        signature = hmac.new(api_secret.encode(), f"GET{timestamp}{endpoint}".encode(), hashlib.sha256).hexdigest()
-        headers = {"api-key": api_key, "signature": signature, "timestamp": str(timestamp)}
-        res = requests.get("https://api.india.delta.exchange" + endpoint, headers=headers, timeout=4)
+        res = requests.get(url, timeout=3.0)
         if res.status_code == 200:
-            wallets = res.json().get("result", [])
-            for w in wallets:
-                if w.get("asset_symbol") in ["USDT", "USD"]:
-                    bal = float(w.get("balance", 0))
-                    return {"balance_usd": bal, "balance_inr": round(bal * USDT_INR_RATE, 2)}
+            data = res.json()
+            candles = []
+            for k in data:
+                candles.append({'time': int(k[0]/1000), 'open': float(k[1]), 'high': float(k[2]), 'low': float(k[3]), 'close': float(k[4]), 'volume': float(k[5])})
+            return candles
     except Exception:
         pass
-    return {"balance_usd": 0.0, "balance_inr": 0.0}
+    return fetch_delta_candles(symbol, resolution, limit)
 
 def fetch_delta_candles(symbol, resolution, limit=35):
+    """Futures Execution mate Delta Exchange API"""
     cache_key = f"{symbol}_{resolution}"
     now = int(time.time())
     if cache_key in MARKET_CACHE and (now - MARKET_CACHE[cache_key]['ts'] < CACHE_TTL):
@@ -192,7 +191,8 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
     htf_tf = '1d' if mode == 'swing' else '1h'
     ltf_tf = '1h' if mode == 'swing' else '15m'
 
-    htf_raw = fetch_delta_candles(sym, htf_tf, 30)
+    # HTF (Daily Trend) from Spot, LTF (Entry) from Futures
+    htf_raw = fetch_binance_spot_candles(sym, htf_tf, 30)
     ltf_raw = fetch_delta_candles(sym, ltf_tf, 30)
     if not htf_raw or not ltf_raw: return None
 
@@ -249,7 +249,7 @@ def analyze_single_coin(sym, mode, risk_usdt, rr_ratio, leverage, kc_len, kc_m):
 def execute_broker_order(symbol, side, size):
     cfg = load_config()
     api_key, api_secret = cfg.get("api_key", "").strip(), cfg.get("api_secret", "").strip()
-    if not api_key or not api_secret: return {"status": "simulated", "message": "Demo Mode: Simulated Trade Placed!"}
+    if not api_key or not api_secret: return {"status": "simulated", "message": "Demo Mode: Simulated Futures Trade Placed!"}
     try:
         timestamp = int(time.time())
         endpoint = "/v2/orders"
@@ -258,7 +258,7 @@ def execute_broker_order(symbol, side, size):
         signature = hmac.new(api_secret.encode(), f"POST{timestamp}{endpoint}{payload}".encode(), hashlib.sha256).hexdigest()
         headers = {"api-key": api_key, "signature": signature, "timestamp": str(timestamp), "Content-Type": "application/json"}
         res = requests.post("https://api.india.delta.exchange" + endpoint, data=payload, headers=headers, timeout=4)
-        return {"status": "success", "message": f"Delta Order Executed: {res.text}"}
+        return {"status": "success", "message": f"Delta Futures Order Executed: {res.text}"}
     except Exception as e:
         return {"status": "error", "message": f"Delta Error: {str(e)}"}
 
@@ -268,7 +268,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pro Trading Terminal - Top 20 Assets</title>
+    <title>Pro Hybrid Terminal (Spot HTF + Futures LTF)</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
@@ -289,10 +289,10 @@ HTML_TEMPLATE = """
     <div class="container-fluid">
         <div class="card-custom p-2 px-3 mb-2 d-flex flex-wrap justify-content-between align-items-center">
             <div class="d-flex align-items-center gap-3">
-                <h5 class="fw-bold text-info mb-0">⚡ DELTA TERMINAL (TOP 20 ASSETS)</h5>
+                <h5 class="fw-bold text-info mb-0">⚡ HYBRID TERMINAL (SPOT HTF + FUTURES LTF)</h5>
                 <div class="btn-group btn-group-sm">
-                    <button class="btn btn-outline-info active" id="mode-swing" onclick="switchMode('swing')">Swing (1D+1H)</button>
-                    <button class="btn btn-outline-info" id="mode-intraday" onclick="switchMode('intraday')">Intraday (1H+15m)</button>
+                    <button class="btn btn-outline-info active" id="mode-swing" onclick="switchMode('swing')">Swing (Spot 1D + Fut 1H)</button>
+                    <button class="btn btn-outline-info" id="mode-intraday" onclick="switchMode('intraday')">Intraday (Spot 1H + Fut 15m)</button>
                 </div>
             </div>
             <div class="d-flex align-items-center gap-3">
@@ -307,7 +307,7 @@ HTML_TEMPLATE = """
 
         <div id="active-trade-container" class="mb-2 d-none">
             <div class="p-2 px-3 rounded d-flex justify-content-between align-items-center" style="background: rgba(16,185,129,0.15); border: 1px solid #10b981;">
-                <div><span class="badge bg-success me-2">LIVE POSITION</span><span class="fw-bold text-white" id="at-details">...</span></div>
+                <div><span class="badge bg-success me-2">LIVE FUTURES POSITION</span><span class="fw-bold text-white" id="at-details">...</span></div>
                 <div><span class="fw-bold fs-6 me-3 text-success" id="live-pnl-display">P&L: $0.00</span><button class="btn btn-sm btn-danger fw-bold py-0" onclick="closeActiveTrade()">Exit Position</button></div>
             </div>
         </div>
@@ -316,7 +316,7 @@ HTML_TEMPLATE = """
             <div class="col-md-6">
                 <div class="card-custom p-2">
                     <div class="d-flex justify-content-between align-items-center px-1 mb-1">
-                        <span class="fw-bold text-warning" id="chart1-title">Chart 1: HTF Trend</span>
+                        <span class="fw-bold text-warning" id="chart1-title">Chart 1: Spot HTF Trend</span>
                         <span class="badge bg-secondary" id="active-symbol-1">BTCUSD.P</span>
                     </div>
                     <div id="chart-1" class="chart-box"></div>
@@ -326,7 +326,7 @@ HTML_TEMPLATE = """
             <div class="col-md-6">
                 <div class="card-custom p-2">
                     <div class="d-flex justify-content-between align-items-center px-1 mb-1">
-                        <span class="fw-bold text-info" id="chart2-title">Chart 2: LTF Entry</span>
+                        <span class="fw-bold text-info" id="chart2-title">Chart 2: Futures LTF Entry</span>
                         <span class="badge bg-secondary" id="active-symbol-2">BTCUSD.P</span>
                     </div>
                     <div id="chart-2" class="chart-box"></div>
@@ -337,7 +337,7 @@ HTML_TEMPLATE = """
 
         <div class="card-custom p-2">
             <div class="d-flex justify-content-between align-items-center px-2 mb-2">
-                <span class="fw-bold text-info">📋 TOP 20 FUTURES & COMMODITIES SCANNER</span>
+                <span class="fw-bold text-info">📋 HYBRID FUTURES SCANNER (Spot Trend + Futures Execution)</span>
                 <span class="small text-secondary">Capital: <b class="text-white" id="lbl-capital">₹10,000</b> | Risk: <b class="text-danger" id="lbl-risk">₹500</b></span>
             </div>
             <div class="table-responsive" style="max-height: 350px; overflow-y: auto;">
@@ -345,9 +345,9 @@ HTML_TEMPLATE = """
                     <thead>
                         <tr class="text-secondary small">
                             <th>Contract</th>
-                            <th>Price</th>
-                            <th id="th-htf">HTF RSI</th>
-                            <th id="th-ltf">LTF RSI</th>
+                            <th>Futures Price</th>
+                            <th id="th-htf">Spot HTF RSI</th>
+                            <th id="th-ltf">Futures LTF RSI</th>
                             <th>KC Bands (Low / Up)</th>
                             <th>Vol</th>
                             <th>Signal</th>
@@ -359,7 +359,7 @@ HTML_TEMPLATE = """
                         </tr>
                     </thead>
                     <tbody id="scanner-table">
-                        <tr><td colspan="12" class="text-center py-3 text-info">Scanning Top 20 Assets...</td></tr>
+                        <tr><td colspan="12" class="text-center py-3 text-info">Scanning Hybrid Feeds...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -398,7 +398,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <div class="modal fade" id="botModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header border-secondary"><h6 class="modal-title fw-bold text-info">🤖 Telegram Bot</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-2"><label class="form-label small">Bot Token</label><input type="text" class="form-control" id="cfg-tg-token"></div><div class="mb-2"><label class="form-label small">Chat ID</label><input type="text" class="form-control" id="cfg-tg-chat" value="7687426054"></div></div><div class="modal-footer border-secondary"><button type="button" class="btn btn-primary w-100 fw-bold" onclick="saveBotSettings()">Save</button></div></div></div></div>
+    <div class="modal fade" id="botModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header border-secondary"><h6 class="modal-title fw-bold text-info">🤖 Telegram Bot</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-2"><label class="form-label small">Bot Token</label><input type="text" class="form-control" id="cfg-tg-token"></div><div class="mb-2"><label class="form-label small">Chat ID</label><input type="text" class="form-control" id="cfg-tg-chat"></div></div><div class="modal-footer border-secondary"><button type="button" class="btn btn-primary w-100 fw-bold" onclick="saveBotSettings()">Save</button></div></div></div></div>
     <div class="modal fade" id="settingsModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header border-secondary"><h6 class="modal-title fw-bold text-info">⚙ Setup</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="row g-2 mb-2"><div class="col-6"><label class="form-label small">KC Length</label><input type="number" class="form-control" id="cfg-kcl" value="20"></div><div class="col-6"><label class="form-label small">KC Mult</label><input type="number" step="0.1" class="form-control" id="cfg-kcm" value="1.0"></div><div class="col-6"><label class="form-label small">Capital (₹)</label><input type="number" class="form-control" id="cfg-capital" value="10000"></div><div class="col-6"><label class="form-label small">Risk (₹)</label><input type="number" class="form-control" id="cfg-risk" value="500"></div><div class="col-6"><label class="form-label small">Leverage</label><input type="number" class="form-control" id="cfg-lev" value="5"></div><div class="col-6"><label class="form-label small">R:R</label><select class="form-select" id="cfg-rr"><option value="2.0">1 : 2</option></select></div></div><div class="mb-2"><label class="form-label small">Delta API Key</label><input type="text" class="form-control" id="cfg-api-key"></div><div class="mb-2"><label class="form-label small">Delta API Secret</label><input type="password" class="form-control" id="cfg-api-secret"></div></div><div class="modal-footer border-secondary"><button type="button" class="btn btn-info w-100 fw-bold" onclick="saveSettings()">Save</button></div></div></div></div>
 
     <script>
@@ -433,13 +433,13 @@ HTML_TEMPLATE = """
 
         async function loadDualCharts(sym) {
             currentSymbol = sym;
-            document.getElementById('active-symbol-1').innerText = sym + '.P';
-            document.getElementById('active-symbol-2').innerText = sym + '.P';
+            document.getElementById('active-symbol-1').innerText = sym + ' (Spot)';
+            document.getElementById('active-symbol-2').innerText = sym + '.P (Futures)';
             const htf = currentMode === 'swing' ? '1d' : '1h';
             const ltf = currentMode === 'swing' ? '1h' : '15m';
 
             try {
-                const res1 = await fetch(`/api/chart/${sym}/${htf}`);
+                const res1 = await fetch(`/api/spot_chart/${sym}/${htf}`);
                 const d1 = await res1.json();
                 if (d1.candles) { s1.setData(d1.candles); u1.setData(d1.kc_upper); m1.setData(d1.kc_mid); l1.setData(d1.kc_lower); rs1.setData(d1.rsi); }
 
@@ -612,6 +612,26 @@ def api_wallet():
 def api_journal():
     return jsonify(load_journal())
 
+@app.route('/api/spot_chart/<symbol>/<interval>')
+def api_spot_chart(symbol, interval):
+    cfg = load_config()
+    raw = fetch_binance_spot_candles(symbol, interval, limit=35)
+    if not raw: return jsonify({"error": "No data"})
+    times = [int(k['time']) for k in raw]
+    closes = [float(k['close']) for k in raw]
+    highs = [float(k['high']) for k in raw]
+    lows = [float(k['low']) for k in raw]
+    kc_u, kc_m, kc_l = calculate_keltner_series(closes, highs, lows, int(cfg.get("kc_length", 20)), float(cfg.get("kc_mult", 1.0)))
+    rsis = calculate_rsi_series(closes, 14)
+    candles, u_b, m_b, l_b, r_d = [], [], [], [], []
+    for i in range(len(times)):
+        candles.append({"time": times[i], "open": float(raw[i]['open']), "high": highs[i], "low": lows[i], "close": closes[i]})
+        u_b.append({"time": times[i], "value": round(kc_u[i], 4)})
+        m_b.append({"time": times[i], "value": round(kc_m[i], 4)})
+        l_b.append({"time": times[i], "value": round(kc_l[i], 4)})
+        r_d.append({"time": times[i], "value": round(rsis[i], 2)})
+    return jsonify({"candles": candles, "kc_upper": u_b, "kc_mid": m_b, "kc_lower": l_b, "rsi": r_d})
+
 @app.route('/api/chart/<symbol>/<interval>')
 def api_chart(symbol, interval):
     cfg = load_config()
@@ -648,7 +668,7 @@ def api_scan():
             if res:
                 results.append(res)
                 if res['signal'] in ['STRONG LONG', 'STRONG SHORT']:
-                    send_telegram_alert(f"🚨 *Delta Alert*: {res['symbol']} ({res['mode']}) -> *{res['signal']}* @ ${res['price']}")
+                    send_telegram_alert(f"🚨 *Hybrid Alert*: {res['symbol']} ({res['mode']}) -> *{res['signal']}* @ ${res['price']}")
     
     SCAN_CACHE[mode] = {"ts": now, "data": results}
     return jsonify(results)
@@ -706,7 +726,7 @@ def execute_order():
     broker_res = execute_broker_order(symbol, side, qty)
     new_trade = {"symbol": symbol + ".P", "clean_sym": symbol, "side": side.upper(), "qty": qty, "entry_price": entry_price, "entry_time": time.strftime("%H:%M:%S"), "sl": sl, "target": target}
     save_trade_state({"active_trade": new_trade})
-    send_telegram_alert(f"✅ *Trade Executed*: {new_trade['side']} {new_trade['symbol']} | Qty: {qty} | Entry: ${entry_price}")
+    send_telegram_alert(f"✅ *Futures Hybrid Trade Executed*: {new_trade['side']} {new_trade['symbol']} | Qty: {qty} | Entry: ${entry_price}")
     return jsonify({"status": "success", "message": broker_res.get("message", "Order Placed!"), "trade": new_trade})
 
 if __name__ == '__main__':
