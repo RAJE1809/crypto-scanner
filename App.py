@@ -15,12 +15,11 @@ CONFIG_FILE = os.path.join(BASE_DIR, "broker_config.json")
 STATE_FILE = os.path.join(BASE_DIR, "trade_state.json")
 JOURNAL_FILE = os.path.join(BASE_DIR, "trade_journal.json")
 
-FUTURES_WATCHLIST = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT', 'SUIUSDT', 'LINKUSDT', 'AVAXUSDT', 'PAXGUSDT']
+DEFAULT_WATCHLIST = ['BTCUSD', 'ETHUSD', 'XAUTUSD', 'SOLUSD', 'EVAAUSD', 'LABUSD', 'MUSD', 'XRPUSE', 'BLURUSD', 'HUSD']
 USDT_INR_RATE = 88.0
 
 MARKET_CACHE = {}
-SCAN_CACHE = {"swing": {"ts": 0, "data": []}, "intraday": {"ts": 0, "data": []}}
-ALERT_COOLDOWN = {}
+SCAN_CACHE = {"data": []}
 
 def clean_old_memory():
     now = time.time()
@@ -31,7 +30,6 @@ def clean_old_memory():
 
 def load_config():
     default_cfg = {
-        "broker": "delta",
         "api_key": "",
         "api_secret": "",
         "telegram_token": "8847204764:AAEopmSPVSusOSy8tbDBINE6FGOv1hWn7iE",
@@ -40,11 +38,12 @@ def load_config():
         "max_risk_inr": 500,
         "rr_ratio": 2.0,
         "leverage": 5,
-        "kc_length": 20,
-        "kc_mult": 1.0,
-        "min_volume_spike": 0,   # Custom Filter: Volume Spike %
-        "min_rsi_filter": 0,     # Custom Filter: Min RSI
-        "auto_trade": False
+        "rsi_period": 14,
+        "ema_fast": 20,
+        "ema_slow": 50,
+        "timeframe": "1h",
+        "watchlist": DEFAULT_WATCHLIST,
+        "scanning_active": False
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -72,21 +71,6 @@ def save_trade_state(state):
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f, indent=4)
 
-def load_journal():
-    if os.path.exists(JOURNAL_FILE):
-        try:
-            with open(JOURNAL_FILE, 'r') as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return []
-
-def save_to_journal(trade_record):
-    journal = load_journal()
-    journal.insert(0, trade_record)
-    with open(JOURNAL_FILE, 'w') as f:
-        json.dump(journal[:50], f, indent=4)
-
 def send_telegram_alert(message):
     cfg = load_config()
     token = cfg.get("telegram_token", "").strip()
@@ -97,40 +81,27 @@ def send_telegram_alert(message):
     except Exception:
         pass
 
-def fetch_multi_exchange_candles(symbol, resolution, limit=35):
-    """Multi-Exchange Data Feed: Binance Public API + Delta Exchange Fallback"""
+def fetch_candles(symbol, resolution, limit=60):
     cache_key = f"{symbol}_{resolution}"
     now = int(time.time())
-    if cache_key in MARKET_CACHE and (now - MARKET_CACHE[cache_key]['ts'] < 8):
+    if cache_key in MARKET_CACHE and (now - MARKET_CACHE[cache_key]['ts'] < 5):
         return MARKET_CACHE[cache_key]['data']
 
-    # 1. Try Binance Feed First (Fastest & Deepest Liquidity Data)
-    try:
-        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={resolution}&limit={limit}"
-        res = requests.get(url, timeout=2.0)
-        if res.status_code == 200:
-            raw = res.json()
-            candles = [{'time': int(k[0]/1000), 'open': float(k[1]), 'high': float(k[2]), 'low': float(k[3]), 'close': float(k[4]), 'volume': float(k[5])} for k in raw]
-            MARKET_CACHE[cache_key] = {'ts': now, 'data': candles}
-            return candles
-    except Exception:
-        pass
-
-    # 2. Fallback to Delta Exchange API
-    sec_map = {'15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
+    sec_map = {'15minute': 900, '1h': 3600, '4h': 14400, '1d': 86400, '15m': 900}
     step = sec_map.get(resolution, 3600)
-    start_time = now - (step * (limit + 4))
-    delta_sym = symbol.replace('USDT', 'USD') if 'PAXG' not in symbol else 'GOLD'
+    start_time = now - (step * (limit + 5))
+    delta_sym = symbol.replace('USDT', 'USD') if 'GOLD' not in symbol else 'XAUTUSD'
 
     try:
-        params = {"resolution": resolution, "symbol": delta_sym, "start": start_time, "end": now}
+        params = {"resolution": '1h' if '15' not in resolution else '15m', "symbol": delta_sym, "start": start_time, "end": now}
         res = requests.get("https://api.india.delta.exchange/v2/history/candles", params=params, timeout=2.5)
         if res.status_code == 200:
-            raw_res = res.json().get("result", [])
-            if raw_res:
-                candles = [{'time': int(c['time']), 'open': float(c['open']), 'high': float(c['high']), 'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))} for c in raw_res]
-                MARKET_CACHE[cache_key] = {'ts': now, 'data': candles}
-                return candles
+            candles = res.json().get("result", [])
+            if candles and len(candles) > 10:
+                candles = sorted(candles, key=lambda x: int(x['time']))
+                formatted = [{'time': int(c['time']), 'open': float(c['open']), 'high': float(c['high']), 'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))} for c in candles]
+                MARKET_CACHE[cache_key] = {'ts': now, 'data': formatted[-limit:]}
+                return formatted[-limit:]
     except Exception:
         pass
     return []
@@ -147,142 +118,55 @@ def calculate_rsi(closes, period=14):
     avg_loss = sum(losses[-period:]) / period
     return 100.0 if avg_loss == 0 else round(100 - (100 / (1 + (avg_gain / avg_loss))), 2)
 
-def calculate_keltner(closes, highs, lows, length=20, mult=1.0):
-    k_mult = 2 / (length + 1)
-    ema = closes[0]
-    for price in closes[1:]:
-        ema = (price - ema) * k_mult + ema
-    trs = [highs[0] - lows[0]]
-    for i in range(1, len(closes)):
-        trs.append(max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])))
-    atr = sum(trs[-length:]) / min(len(trs), length)
-    return round(ema + (mult * atr), 4), round(ema - (mult * atr), 4)
+def calculate_ema(series, period):
+    if not series: return 0.0
+    mult = 2 / (period + 1)
+    ema = series[0]
+    for price in series[1:]:
+        ema = (price - ema) * mult + ema
+    return round(ema, 4)
 
-def analyze_coin(sym, mode, cfg):
-    htf_tf = '1d' if mode == 'swing' else '1h'
-    ltf_tf = '1h' if mode == 'swing' else '15m'
-
-    htf_raw = fetch_multi_exchange_candles(sym, htf_tf, 30)
-    ltf_raw = fetch_multi_exchange_candles(sym, ltf_tf, 30)
-    if not htf_raw or not ltf_raw:
+def analyze_coin(sym, cfg):
+    tf = cfg.get("timeframe", "1h")
+    raw = fetch_candles(sym, tf, 50)
+    if not raw or len(raw) < 10:
         return None
 
-    h_close = [float(k['close']) for k in htf_raw]
-    h_high = [float(k['high']) for k in htf_raw]
-    h_low = [float(k['low']) for k in htf_raw]
-    l_close = [float(k['close']) for k in ltf_raw]
-    l_high = [float(k['high']) for k in ltf_raw]
-    l_low = [float(k['low']) for k in ltf_raw]
-    l_vol = [float(k.get('volume', 0)) for k in ltf_raw]
+    closes = [k['close'] for k in raw]
+    opens = [k['open'] for k in raw]
+    close = closes[-1]
+    open_p = opens[-1]
 
-    kc_len = int(cfg.get("kc_length", 20))
-    kc_m = float(cfg.get("kc_mult", 1.0))
-    risk_usdt = float(cfg.get("max_risk_inr", 500)) / USDT_INR_RATE
-    rr_ratio = float(cfg.get("rr_ratio", 2.0))
-    leverage = max(5.0, float(cfg.get("leverage", 5.0)))
+    rsi_per = int(cfg.get("rsi_period", 14))
+    ema_f_per = int(cfg.get("ema_fast", 20))
+    ema_s_per = int(cfg.get("ema_slow", 50))
 
-    htf_rsi = calculate_rsi(h_close, 14)
-    htf_kcu, htf_kcl = calculate_keltner(h_close, h_high, h_low, kc_len, kc_m)
-    ltf_rsi = calculate_rsi(l_close, 14)
-    ltf_kcu, ltf_kcl = calculate_keltner(l_close, l_high, l_low, kc_len, kc_m)
+    rsi = calculate_rsi(closes, rsi_per)
+    ema_fast = calculate_ema(closes, ema_f_per)
+    ema_slow = calculate_ema(closes, ema_s_per)
 
-    curr_price = l_close[-1]
-    recent_vol = sum(l_vol[-5:])
-    avg_vol_24h = (sum(l_vol) / len(l_vol)) * 5 if l_vol else 1
-    vol_spike_pct = round(((recent_vol - avg_vol_24h) / avg_vol_24h) * 100, 1) if avg_vol_24h > 0 else 0
-
-    htf_long = (htf_rsi > 60.50) and (h_close[-1] > htf_kcu)
-    ltf_long = (ltf_rsi > 60.50) and (curr_price > ltf_kcu)
-    htf_short = (htf_rsi < 40.50) and (h_close[-1] < htf_kcl)
-    ltf_short = (ltf_rsi < 40.50) and (curr_price < ltf_kcl)
+    candle_col = "Green" if close >= open_p else "Red"
+    momentum = "Bullish" if close > ema_fast else ("Bearish" if close < ema_fast else "Flat")
+    trend = "Up" if ema_fast > ema_slow else "Down"
 
     signal = "NEUTRAL"
-    sl_price = round(ltf_kcl * 0.998, 4)
-    per_unit_risk = abs(curr_price - sl_price) or (curr_price * 0.005)
-    calc_qty = round(risk_usdt / per_unit_risk, 3)
-    target_price = round(curr_price + (per_unit_risk * rr_ratio), 4)
-
-    if htf_long and ltf_long:
-        signal = "STRONG LONG"
-    elif htf_short and ltf_short:
-        signal = "STRONG SHORT"
-        sl_price = round(ltf_kcu * 1.002, 4)
-        per_unit_risk = abs(sl_price - curr_price) or (curr_price * 0.005)
-        calc_qty = round(risk_usdt / per_unit_risk, 3)
-        target_price = round(curr_price - (per_unit_risk * rr_ratio), 4)
-
-    # Apply Custom Filters from settings
-    min_vol = float(cfg.get("min_volume_spike", 0))
-    min_rsi = float(cfg.get("min_rsi_filter", 0))
-    if vol_spike_pct < min_vol or ltf_rsi < min_rsi:
-        if signal != "NEUTRAL":
-            signal = "FILTERED"
+    if rsi > float(cfg.get("rsi_bull", 60)) and trend == "Up" and momentum == "Bullish":
+        signal = "BUY"
+    elif rsi < float(cfg.get("rsi_bear", 40)) and trend == "Down" and momentum == "Bearish":
+        signal = "SELL"
 
     return {
         'symbol': sym,
-        'price': curr_price,
-        'htf_rsi': htf_rsi,
-        'ltf_rsi': ltf_rsi,
-        'kc_u': ltf_kcu,
-        'kc_l': ltf_kcl,
-        'vol_spike': vol_spike_pct,
-        'signal': signal,
-        'sl': sl_price,
-        'target': target_price,
-        'lot_size': calc_qty,
-        'margin_inr': round((calc_qty * curr_price * USDT_INR_RATE) / leverage)
+        'close': close,
+        'open': open_p,
+        'rsi': rsi,
+        'ema_fast': ema_fast,
+        'ema_slow': ema_slow,
+        'candle': candle_col,
+        'momentum': momentum,
+        'trend': trend,
+        'signal': signal
     }
-
-def execute_broker_order(symbol, side, size):
-    cfg = load_config()
-    api_key = cfg.get("api_key", "").strip()
-    api_secret = cfg.get("api_secret", "").strip()
-    if not api_key or not api_secret:
-        return {"status": "simulated", "message": "Demo Mode: Order Executed & Locked!"}
-    try:
-        timestamp = int(time.time())
-        endpoint = "/v2/orders"
-        body = {
-            "product_symbol": symbol.replace('USDT', 'USD'),
-            "size": max(1, int(float(size))),
-            "side": side.lower(),
-            "order_type": "market_order"
-        }
-        payload = json.dumps(body)
-        signature = hmac.new(api_secret.encode(), f"POST{timestamp}{endpoint}{payload}".encode(), hashlib.sha256).hexdigest()
-        headers = {"api-key": api_key, "signature": signature, "timestamp": str(timestamp), "Content-Type": "application/json"}
-        res = requests.post("https://api.india.delta.exchange" + endpoint, data=payload, headers=headers, timeout=4)
-        return {"status": "success", "message": f"Delta Live Order Placed: {res.text}"}
-    except Exception as e:
-        return {"status": "error", "message": f"Delta Error: {str(e)}"}
-
-def place_system_trade(symbol, side, qty, price, sl, target, source="Dashboard"):
-    state = load_trade_state()
-    if state.get("active_trade"):
-        return {"status": "error", "message": "1 Active Trade pehle se chalu hai!"}
-
-    broker_res = execute_broker_order(symbol, side, qty)
-    new_trade = {
-        "symbol": symbol,
-        "side": side.upper(),
-        "qty": float(qty),
-        "entry_price": float(price),
-        "entry_time": time.strftime("%H:%M:%S"),
-        "sl": float(sl),
-        "target": float(target),
-        "source": source
-    }
-    save_trade_state({"active_trade": new_trade})
-    send_telegram_alert(
-        f"✅ *TRADE EXECUTED ({source})*\n"
-        f"📌 Coin: `{symbol}`\n"
-        f"📈 Side: *{side.upper()}*\n"
-        f"💰 Entry Price: `${price}`\n"
-        f"📦 Auto Lot Size: `{qty}`\n"
-        f"🛑 Buffer SL: `${sl}`\n"
-        f"🎯 Target (1:2): `${target}`"
-    )
-    return {"status": "success", "message": broker_res.get("message", "Order Placed!"), "trade": new_trade}
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -290,393 +174,319 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pro Crypto Scanner & Terminal</title>
+    <title>Delta Exchange x Tradehull Scanner Algo</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
     <style>
-        body { background-color: #0b1120; color: #f8fafc; font-family: system-ui, sans-serif; font-size: 13px; }
-        .box { background-color: #151f32; border: 1px solid #263554; border-radius: 10px; }
-        .table-dark { background-color: #151f32; --bs-table-bg: #151f32; }
-        .sig-long { background-color: #10b981; color: #fff; padding: 4px 10px; border-radius: 6px; font-weight: 700; display: inline-block; }
-        .sig-short { background-color: #ef4444; color: #fff; padding: 4px 10px; border-radius: 6px; font-weight: 700; display: inline-block; }
-        .sig-neutral { background-color: #334155; color: #cbd5e1; padding: 4px 10px; border-radius: 6px; display: inline-block; }
-        .coin-btn { cursor: pointer; color: #38bdf8; font-weight: 700; text-decoration: underline; }
-        .tv-box { height: 320px; width: 100%; border-radius: 8px; overflow: hidden; }
-        .modal-content { background-color: #1e293b; color: #fff; border: 1px solid #475569; }
-        .form-control, .form-select { background-color: #0f172a; border: 1px solid #334155; color: #fff; }
+        body { background-color: #060e18; color: #cbd5e1; font-family: 'Inter', sans-serif; font-size: 13px; }
+        .top-nav { background-color: #0b1728; border-bottom: 1px solid #1e293b; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; }
+        .panel { background-color: #0d1b2a; border: 1px solid #1b2a4a; border-radius: 8px; padding: 15px; margin-bottom: 15px; }
+        .table-custom { background-color: #0d1b2a; color: #fff; font-size: 12px; }
+        .table-custom th { background-color: #112238; color: #94a3b8; border-color: #1b2a4a; }
+        .table-custom td { border-color: #1b2a4a; vertical-align: middle; }
+        .badge-buy { background-color: #064e3b; color: #34d399; border: 1px solid #059669; padding: 4px 12px; border-radius: 4px; font-weight: bold; }
+        .badge-sell { background-color: #7f1d1d; color: #f87171; border: 1px solid #dc2626; padding: 4px 12px; border-radius: 4px; font-weight: bold; }
+        .badge-neutral { background-color: #1e293b; color: #94a3b8; padding: 4px 12px; border-radius: 4px; }
+        .badge-pending { background-color: #1e293b; color: #f59e0b; border: 1px solid #d97706; padding: 4px 10px; border-radius: 4px; }
+        .form-control, .form-select { background-color: #060e18; border: 1px solid #1e293b; color: #fff; font-size: 12px; }
+        .pill-tag { background: #112238; border: 1px solid #1e293b; padding: 5px 12px; border-radius: 20px; display: inline-block; margin: 3px; font-size: 11px; }
+        .pill-tag span { cursor: pointer; color: #f87171; margin-left: 6px; }
     </style>
 </head>
-<body class="p-2 p-md-3">
-    <div class="container-fluid">
-        <!-- TOP BAR WITH DIRECT BUTTONS -->
-        <div class="box p-2 px-3 mb-3 d-flex flex-wrap justify-content-between align-items-center gap-2">
+<body>
+    <!-- TOP NAVBAR -->
+    <div class="top-nav">
+        <div class="d-flex align-items-center gap-3">
+            <div style="background:#059669; color:#fff; padding:6px 12px; border-radius:6px; font-weight:bold;">A</div>
             <div>
-                <h5 class="fw-bold text-info mb-0">⚡ Multi-Exchange Crypto Scanner</h5>
-                <div class="small text-secondary">
-                    Capital: <b class="text-white" id="lbl-cap">₹10,000</b> | 
-                    Risk: <b class="text-warning" id="lbl-risk">₹500</b> | 
-                    Wallet: <b class="text-success" id="lbl-wallet">₹10,000</b>
-                </div>
-            </div>
-
-            <div class="d-flex flex-wrap align-items-center gap-2">
-                <button class="btn btn-warning btn-sm fw-bold" data-bs-toggle="modal" data-bs-target="#brokerModal" id="btn-broker-status">
-                    🔌 Connect Broker
-                </button>
-                <button class="btn btn-primary btn-sm fw-bold" data-bs-toggle="modal" data-bs-target="#botModal">
-                    🤖 Trading Bot & Alerts
-                </button>
-                <button class="btn btn-info btn-sm fw-bold" data-bs-toggle="modal" data-bs-target="#filterModal">
-                    🎛 Custom Filters
-                </button>
-                <button class="btn btn-outline-success btn-sm fw-bold" id="btn-autotrade" onclick="toggleAutoTrade()">
-                    ⚡ Auto-Trade: OFF
-                </button>
-                <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#journalModal">
-                    📖 Journal
-                </button>
+                <h6 class="mb-0 fw-bold text-white">DELTA EXCHANGE X TRADEHULL</h6>
+                <small class="text-secondary">Scanner Algo Terminal</small>
             </div>
         </div>
-
-        <!-- ACTIVE TRADE BAR -->
-        <div id="active-trade-bar" class="box p-2 px-3 mb-3 d-none" style="border-color: #10b981; background: rgba(16, 185, 129, 0.12);">
-            <div class="d-flex flex-wrap justify-content-between align-items-center">
-                <div>
-                    <span class="badge bg-success me-2">LIVE POSITION</span>
-                    <span class="fw-bold" id="at-info"></span>
-                </div>
-                <div class="d-flex align-items-center gap-3 mt-1 mt-md-0">
-                    <span class="fs-6 fw-bold" id="at-pnl">P&L: ₹0</span>
-                    <button class="btn btn-danger btn-sm fw-bold py-0" onclick="exitTrade()">Exit Trade</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- SIMPLE SCANNER TABLE -->
-        <div class="box p-3 mb-3">
-            <div class="d-flex flex-wrap justify-content-between align-items-center mb-2">
-                <div class="d-flex align-items-center gap-2">
-                    <h6 class="fw-bold text-warning mb-0">📋 Multi-Exchange Live Scanner</h6>
-                    <div class="btn-group btn-group-sm ms-2">
-                        <button class="btn btn-outline-info active" id="tab-swing" onclick="changeMode('swing')">Swing (1D + 1H)</button>
-                        <button class="btn btn-outline-info" id="tab-intraday" onclick="changeMode('intraday')">Intraday (1H + 15m)</button>
-                    </div>
-                </div>
-                <span class="small text-secondary" id="last-update">Updating live...</span>
-            </div>
-
-            <div class="table-responsive">
-                <table class="table table-dark table-hover align-middle mb-0">
-                    <thead>
-                        <tr class="text-secondary small">
-                            <th>Coin (Click Chart)</th>
-                            <th>Live Price</th>
-                            <th id="col-htf">Daily RSI</th>
-                            <th id="col-ltf">1H RSI</th>
-                            <th>Vol Spike %</th>
-                            <th>Setup Signal</th>
-                            <th>Buffer SL</th>
-                            <th>1:2 Target</th>
-                            <th class="text-warning">Auto Lot</th>
-                            <th>Quick Trade</th>
-                        </tr>
-                    </thead>
-                    <tbody id="scanner-tbody">
-                        <tr><td colspan="10" class="text-center py-4 text-info">Scanning multi-exchange feeds...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- DUAL BINANCE/TRADINGVIEW CHARTS -->
-        <div class="row g-2">
-            <div class="col-md-6">
-                <div class="box p-2">
-                    <div class="small fw-bold text-warning mb-1" id="title-c1">HTF Chart</div>
-                    <div id="tv-c1" class="tv-box"></div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="box p-2">
-                    <div class="small fw-bold text-info mb-1" id="title-c2">LTF Chart</div>
-                    <div id="tv-c2" class="tv-box"></div>
-                </div>
-            </div>
+        <div>
+            <span class="badge bg-success px-3 py-2" id="conn-status">🟢 Connected to Delta Exchange</span>
         </div>
     </div>
 
-    <!-- 1. BROKER MODAL -->
-    <div class="modal fade" id="brokerModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header border-secondary">
-                    <h6 class="modal-title fw-bold text-warning">🔌 Connect Broker (Delta Exchange)</h6>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="mb-2"><label class="form-label small">Delta API Key</label><input type="text" class="form-control" id="cfg-key"></div>
-                    <div class="mb-3"><label class="form-label small">Delta API Secret</label><input type="password" class="form-control" id="cfg-secret"></div>
-                    <hr class="border-secondary">
-                    <div class="row g-2">
-                        <div class="col-6"><label class="small">Capital (₹)</label><input type="number" class="form-control" id="cfg-cap" value="10000"></div>
-                        <div class="col-6"><label class="small">Risk per Trade (₹)</label><input type="number" class="form-control" id="cfg-risk" value="500"></div>
-                    </div>
-                </div>
-                <div class="modal-footer border-secondary"><button class="btn btn-warning w-100 fw-bold" onclick="saveAllConfig()">Save & Connect</button></div>
-            </div>
-        </div>
-    </div>
-
-    <!-- 2. BOT MODAL -->
-    <div class="modal fade" id="botModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header border-secondary">
-                    <h6 class="modal-title fw-bold text-info">🤖 Telegram Trading Bot & Alerts</h6>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="mb-2"><label class="form-label small">Bot Token</label><input type="text" class="form-control" id="cfg-token"></div>
-                    <div class="mb-3"><label class="form-label small">Chat ID</label><input type="text" class="form-control" id="cfg-chat" value="7687426054"></div>
-                    <button class="btn btn-outline-info w-100 mb-2 fw-bold" onclick="sendTestMobileAlert()">📲 Send Test Alert to Phone</button>
-                </div>
-                <div class="modal-footer border-secondary"><button class="btn btn-primary w-100 fw-bold" onclick="saveAllConfig()">Save Bot</button></div>
-            </div>
-        </div>
-    </div>
-
-    <!-- 3. CUSTOM FILTER BUILDER MODAL -->
-    <div class="modal fade" id="filterModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header border-secondary">
-                    <h6 class="modal-title fw-bold text-info">🎛 Custom Filter Builder</h6>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="mb-3">
-                        <label class="form-label small">Minimum Volume Spike % (e.g. 50% above avg)</label>
-                        <input type="number" class="form-control" id="cfg-minvol" value="0">
+    <div class="container-fluid p-3">
+        <div class="row">
+            <!-- LEFT CONTROL CENTRE -->
+            <div class="col-lg-4">
+                <!-- CONNECTION PANEL -->
+                <div class="panel">
+                    <h6 class="text-white fw-bold mb-3">CONNECTION</h6>
+                    <div class="mb-2">
+                        <label class="form-label text-secondary small">API Key</label>
+                        <input type="password" class="form-control" id="api-key" value="************************">
                     </div>
                     <div class="mb-3">
-                        <label class="form-label small">Minimum RSI Threshold</label>
-                        <input type="number" class="form-control" id="cfg-minrsi" value="0">
+                        <label class="form-label text-secondary small">API Secret</label>
+                        <input type="password" class="form-control" id="api-secret" value="************************">
                     </div>
-                    <small class="text-secondary">Coins jo in conditions ko match nahi karenge, unhe scanner hide kar dega.</small>
+                    <button class="btn btn-outline-light w-100 btn-sm fw-bold" onclick="toggleConnect()" id="conn-btn">Disconnect</button>
                 </div>
-                <div class="modal-footer border-secondary"><button class="btn btn-info w-100 fw-bold" onclick="saveAllConfig()">Apply Filters</button></div>
-            </div>
-        </div>
-    </div>
 
-    <!-- 4. JOURNAL MODAL -->
-    <div class="modal fade" id="journalModal" tabindex="-1">
-        <div class="modal-dialog modal-lg">
-            <div class="modal-content">
-                <div class="modal-header border-secondary">
-                    <h6 class="modal-title fw-bold text-info">📖 Trading Journal</h6>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                <!-- WATCHLIST PANEL -->
+                <div class="panel">
+                    <h6 class="text-white fw-bold mb-3">WATCHLIST</h6>
+                    <div id="watchlist-pills" class="mb-3"></div>
+                    <div class="input-group input-group-sm">
+                        <input type="text" class="form-control" id="new-symbol" placeholder="Add symbol e.g. DOGEUSD">
+                        <button class="btn btn-success" onclick="addSymbol()">Add</button>
+                    </div>
                 </div>
-                <div class="modal-body">
-                    <table class="table table-dark table-sm small">
-                        <thead><tr><th>Time</th><th>Coin</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L</th></tr></thead>
-                        <tbody id="journal-tbody"></tbody>
-                    </table>
+
+                <!-- INDICATORS & CONFIG PANEL -->
+                <div class="panel">
+                    <h6 class="text-white fw-bold mb-3">INDICATORS & SETTINGS</h6>
+                    <div class="row g-2 mb-2">
+                        <div class="col-6">
+                            <label class="text-secondary small">RSI Period</label>
+                            <input type="number" class="form-control" id="cfg-rsi" value="14">
+                        </div>
+                        <div class="col-6">
+                            <label class="text-secondary small">History (days)</label>
+                            <input type="number" class="form-control" id="cfg-hist" value="7">
+                        </div>
+                        <div class="col-6">
+                            <label class="text-secondary small">EMA Fast</label>
+                            <input type="number" class="form-control" id="cfg-emaf" value="20">
+                        </div>
+                        <div class="col-6">
+                            <label class="text-secondary small">EMA Slow</label>
+                            <input type="number" class="form-control" id="cfg-emas" value="50">
+                        </div>
+                        <div class="col-6">
+                            <label class="text-secondary small">RSI Bull ></label>
+                            <input type="number" class="form-control" id="cfg-rsib" value="60">
+                        </div>
+                        <div class="col-6">
+                            <label class="text-secondary small">RSI Bear <</label>
+                            <input type="number" class="form-control" id="cfg-rsis" value="40">
+                        </div>
+                        <div class="col-12 mt-2">
+                            <label class="text-secondary small">Timeframe</label>
+                            <select class="form-select" id="cfg-tf">
+                                <option value="15m">15 Minute</option>
+                                <option value="1h" selected>1 Hour</option>
+                                <option value="4h">4 Hour</option>
+                                <option value="1d">Daily</option>
+                            </select>
+                        </div>
+                    </div>
+                    <button class="btn btn-success w-100 btn-sm fw-bold mt-2" onclick="saveSettings()">Apply Settings</button>
+                </div>
+
+                <!-- CONTINUOUS SCAN CONTROLS -->
+                <div class="panel">
+                    <h6 class="text-white fw-bold mb-3">CONTINUOUS SCAN</h6>
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-success w-50 btn-sm fw-bold" onclick="toggleScan(true)" id="start-btn">Start</button>
+                        <button class="btn btn-outline-danger w-50 btn-sm fw-bold" onclick="toggleScan(false)" id="stop-btn">Stop</button>
+                    </div>
+                    <div class="small text-secondary mt-2" id="scan-status-text">🔴 Stopped • Click Start to begin live scan</div>
+                </div>
+            </div>
+
+            <!-- RIGHT LIVE MARKET WORKSPACE -->
+            <div class="col-lg-8">
+                <div class="panel">
+                    <h5 class="text-white fw-bold mb-1">Signal monitor</h5>
+                    <small class="text-secondary">Live market workspace & automated classification</small>
+
+                    <!-- COUNTER BOXES -->
+                    <div class="row g-2 my-3">
+                        <div class="col-md-4">
+                            <div class="p-3 rounded" style="background:#061325; border:1px solid #1b2a4a;">
+                                <div class="text-secondary small">Symbols monitored</div>
+                                <div class="fs-4 fw-bold text-white" id="cnt-total">0</div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="p-3 rounded" style="background:#061325; border:1px solid #1b2a4a;">
+                                <div class="text-secondary small">Buy signals</div>
+                                <div class="fs-4 fw-bold text-success" id="cnt-buy">0</div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="p-3 rounded" style="background:#061325; border:1px solid #1b2a4a;">
+                                <div class="text-secondary small">Sell signals</div>
+                                <div class="fs-4 fw-bold text-danger" id="cnt-sell">0</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- MAIN SIGNAL TABLE -->
+                    <div class="table-responsive">
+                        <table class="table table-custom table-hover align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th>SYMBOL</th>
+                                    <th>CLOSE</th>
+                                    <th>OPEN</th>
+                                    <th>RSI</th>
+                                    <th>EMA FAST</th>
+                                    <th>EMA SLOW</th>
+                                    <th>CANDLE</th>
+                                    <th>MOMENTUM</th>
+                                    <th>TREND</th>
+                                    <th>SIGNAL</th>
+                                </tr>
+                            </thead>
+                            <tbody id="scanner-tbody">
+                                <tr><td colspan="10" class="text-center py-4 text-secondary">Awaiting first scan... Click Start</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
 
     <script>
-        let currentMode = 'swing';
-        let currentSymbol = 'BTCUSDT';
-        let hasActiveTrade = false;
-        let autoTrade = false;
-        let scanMap = {};
+        let isScanning = false;
+        let scanTimer = null;
+        let watchlist = [];
 
-        function loadCharts(sym) {
-            currentSymbol = sym;
-            let tvSym = "BINANCE:" + sym;
-            const htf = currentMode === 'swing' ? 'D' : '60';
-            const ltf = currentMode === 'swing' ? '60' : '15';
-
-            document.getElementById('title-c1').innerText = `HTF Chart (${htf}): ${tvSym}`;
-            document.getElementById('title-c2').innerText = `LTF Chart (${ltf}): ${tvSym}`;
-            document.getElementById('tv-c1').innerHTML = '';
-            document.getElementById('tv-c2').innerHTML = '';
-
-            new TradingView.widget({
-                "autosize": true, "symbol": tvSym, "interval": htf, "timezone": "Asia/Kolkata", "theme": "dark", "style": "1", "container_id": "tv-c1",
-                "studies": ["KeltnerChannels@tv-basicstudies", "RSI@tv-basicstudies"]
-            });
-            new TradingView.widget({
-                "autosize": true, "symbol": tvSym, "interval": ltf, "timezone": "Asia/Kolkata", "theme": "dark", "style": "1", "container_id": "tv-c2",
-                "studies": ["KeltnerChannels@tv-basicstudies", "RSI@tv-basicstudies"]
-            });
-        }
-
-        function changeMode(m) {
-            currentMode = m;
-            document.getElementById('tab-swing').classList.toggle('active', m === 'swing');
-            document.getElementById('tab-intraday').classList.toggle('active', m === 'intraday');
-            document.getElementById('col-htf').innerText = m === 'swing' ? 'Daily RSI' : '1H RSI';
-            document.getElementById('col-ltf').innerText = m === 'swing' ? '1H RSI' : '15m RSI';
-            loadCharts(currentSymbol);
-            refreshScanner();
-        }
-
-        async function toggleAutoTrade() {
-            autoTrade = !autoTrade;
-            await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ auto_trade: autoTrade }) });
-            updateAutoTradeUI();
-        }
-
-        function updateAutoTradeUI() {
-            const btn = document.getElementById('btn-autotrade');
-            if (autoTrade) {
-                btn.className = "btn btn-success btn-sm fw-bold"; btn.innerText = "⚡ Auto-Trade: ON";
-            } else {
-                btn.className = "btn btn-outline-success btn-sm fw-bold"; btn.innerText = "⚡ Auto-Trade: OFF";
+        async function loadState() {
+            const res = await fetch('/api/state');
+            const data = await res.json();
+            watchlist = data.watchlist || [];
+            document.getElementById('cfg-rsi').value = data.rsi_period || 14;
+            document.getElementById('cfg-emaf').value = data.ema_fast || 20;
+            document.getElementById('cfg-emas').value = data.ema_slow || 50;
+            document.getElementById('cfg-rsib').value = data.rsi_bull || 60;
+            document.getElementById('cfg-rsis').value = data.rsi_bear || 40;
+            document.getElementById('cfg-tf').value = data.timeframe || '1h';
+            
+            renderWatchlist();
+            if (data.scanning_active) {
+                toggleScan(true);
             }
         }
 
-        async function loadConfigAndWallet() {
-            try {
-                const res = await fetch('/api/config');
-                const c = await res.json();
-                document.getElementById('lbl-cap').innerText = "₹" + (c.capital_inr || 10000);
-                document.getElementById('lbl-risk').innerText = "₹" + (c.max_risk_inr || 500);
-                document.getElementById('cfg-cap').value = c.capital_inr || 10000;
-                document.getElementById('cfg-risk').value = c.max_risk_inr || 500;
-                document.getElementById('cfg-key').value = c.api_key || '';
-                document.getElementById('cfg-secret').value = c.api_secret || '';
-                document.getElementById('cfg-token').value = c.telegram_token || '';
-                document.getElementById('cfg-chat').value = c.telegram_chat_id || '';
-                document.getElementById('cfg-minvol').value = c.min_volume_spike || 0;
-                document.getElementById('cfg-minrsi').value = c.min_rsi_filter || 0;
-                autoTrade = Boolean(c.auto_trade);
-                updateAutoTradeUI();
-
-                const wRes = await fetch('/api/wallet');
-                const w = await wRes.json();
-                document.getElementById('lbl-wallet').innerText = `₹${w.balance_inr.toLocaleString()} ($${w.balance_usd.toFixed(2)})`;
-                if (w.connected) {
-                    document.getElementById('btn-broker-status').className = "btn btn-success btn-sm fw-bold";
-                    document.getElementById('btn-broker-status').innerText = "✅ Broker Connected";
-                }
-            } catch(e){}
+        function renderWatchlist() {
+            const box = document.getElementById('watchlist-pills');
+            box.innerHTML = watchlist.map(s => `<div class="pill-tag">${s} <span onclick="removeSymbol('${s}')">✕</span></div>`).join('');
         }
 
-        async function saveAllConfig() {
+        async function addSymbol() {
+            const sym = document.getElementById('new-symbol').value.trim().toUpperCase();
+            if (!sym || watchlist.includes(sym)) return;
+            watchlist.push(sym);
+            document.getElementById('new-symbol').value = '';
+            await saveSettingsToBackend();
+            renderWatchlist();
+        }
+
+        async function removeSymbol(sym) {
+            watchlist = watchlist.filter(s => s !== sym);
+            await saveSettingsToBackend();
+            renderWatchlist();
+        }
+
+        async function saveSettings() {
+            await saveSettingsToBackend();
+            alert("Settings Applied Successfully!");
+        }
+
+        async function saveSettingsToBackend() {
             const payload = {
-                capital_inr: Number(document.getElementById('cfg-cap').value),
-                max_risk_inr: Number(document.getElementById('cfg-risk').value),
-                api_key: document.getElementById('cfg-key').value,
-                api_secret: document.getElementById('cfg-secret').value,
-                telegram_token: document.getElementById('cfg-token').value,
-                telegram_chat_id: document.getElementById('cfg-chat').value,
-                min_volume_spike: Number(document.getElementById('cfg-minvol').value),
-                min_rsi_filter: Number(document.getElementById('cfg-minrsi').value)
+                rsi_period: Number(document.getElementById('cfg-rsi').value),
+                ema_fast: Number(document.getElementById('cfg-emaf').value),
+                ema_slow: Number(document.getElementById('cfg-emas').value),
+                rsi_bull: Number(document.getElementById('cfg-rsib').value),
+                rsi_bear: Number(document.getElementById('cfg-rsis').value),
+                timeframe: document.getElementById('cfg-tf').value,
+                watchlist: watchlist,
+                scanning_active: isScanning
             };
-            await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-            alert("Settings Saved Successfully!");
-            loadConfigAndWallet();
-            refreshScanner();
+            await fetch('/api/state', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
         }
 
-        async function sendTestMobileAlert() {
-            const res = await fetch('/api/test_telegram', { method: 'POST' });
-            const d = await res.json();
-            alert(d.message);
+        function toggleScan(status) {
+            isScanning = status;
+            const statusTxt = document.getElementById('scan-status-text');
+            if (isScanning) {
+                statusTxt.innerHTML = "🟢 Live Scanning Active (Every 3s)";
+                document.getElementById('start-btn').className = "btn btn-success w-50 btn-sm fw-bold active";
+                document.getElementById('stop-btn').className = "btn btn-danger w-50 btn-sm fw-bold";
+                runScanLoop();
+            } else {
+                statusTxt.innerHTML = "🔴 Stopped • Click Start to begin live scan";
+                document.getElementById('start-btn').className = "btn btn-success w-50 btn-sm fw-bold";
+                document.getElementById('stop-btn').className = "btn btn-outline-danger w-50 btn-sm fw-bold active";
+                if (scanTimer) clearTimeout(scanTimer);
+            }
+            saveSettingsToBackend();
         }
 
-        async function manualOrder(sym, side) {
-            const c = scanMap[sym];
-            if (!c) return;
-            const res = await fetch('/api/order', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ symbol: sym, side: side, qty: c.lot_size, price: c.price, sl: c.sl, target: c.target })
-            });
-            const d = await res.json();
-            alert(d.message);
-            checkTradeAndJournal();
-        }
-
-        async function exitTrade() {
-            await fetch('/api/close_active_trade', { method: 'POST' });
-            checkTradeAndJournal();
-        }
-
-        async function checkTradeAndJournal() {
+        async function runScanLoop() {
+            if (!isScanning) return;
             try {
-                const res = await fetch('/api/trade_state');
-                const d = await res.json();
-                const bar = document.getElementById('active-trade-bar');
-                if (d.active_trade) {
-                    hasActiveTrade = true;
-                    bar.classList.remove('d-none');
-                    const t = d.active_trade;
-                    document.getElementById('at-info').innerText = `${t.symbol} (${t.side}) | Lot: ${t.qty} | Entry: $${t.entry_price} | SL: $${t.sl} | TP: $${t.target}`;
-                    const liveP = scanMap[t.symbol]?.price || t.entry_price;
-                    const diff = t.side === 'BUY' ? (liveP - t.entry_price) : (t.entry_price - liveP);
-                    const pnlInr = Math.round(diff * t.qty * 88);
-                    document.getElementById('at-pnl').innerText = `Live P&L: ₹${pnlInr} ($${(diff*t.qty).toFixed(2)})`;
-                } else {
-                    hasActiveTrade = false;
-                    bar.classList.add('d-none');
-                }
-
-                const jRes = await fetch('/api/journal');
-                const jList = await jRes.json();
-                document.getElementById('journal-tbody').innerHTML = jList.map(j => 
-                    `<tr><td>${j.exit_time}</td><td>${j.symbol}</td><td>${j.side}</td><td>${j.qty}</td><td>$${j.entry}</td><td>$${j.exit}</td><td class="${j.pnl>=0?'text-success':'text-danger'} fw-bold">$${j.pnl}</td></tr>`
-                ).join('') || '<tr><td colspan="7" class="text-center">No closed trades yet</td></tr>';
-            } catch(e){}
-        }
-
-        async function refreshScanner() {
-            try {
-                const res = await fetch(`/api/scan?mode=${currentMode}`);
+                const res = await fetch('/api/scan');
                 const data = await res.json();
-                const tbody = document.getElementById('scanner-tbody');
-                if (!data || !data.length) return;
-
-                let html = '';
-                data.forEach(c => {
-                    scanMap[c.symbol] = c;
-                    let sClass = c.signal === 'STRONG LONG' ? 'sig-long' : (c.signal === 'STRONG SHORT' ? 'sig-short' : 'sig-neutral');
-                    if(c.signal === 'FILTERED') return;
-                    let dis = hasActiveTrade ? 'disabled' : '';
-
-                    html += `
-                        <tr>
-                            <td class="coin-btn" onclick="loadCharts('${c.symbol}')">${c.symbol}</td>
-                            <td class="fw-bold">$${c.price}</td>
-                            <td class="${c.htf_rsi>60.5?'text-success fw-bold':(c.htf_rsi<40.5?'text-danger fw-bold':'')}">${c.htf_rsi}</td>
-                            <td class="${c.ltf_rsi>60.5?'text-success fw-bold':(c.ltf_rsi<40.5?'text-danger fw-bold':'')}">${c.ltf_rsi}</td>
-                            <td>${c.vol_spike}%</td>
-                            <td><span class="${sClass}">${c.signal}</span></td>
-                            <td class="text-danger">$${c.sl}</td>
-                            <td class="text-success">$${c.target}</td>
-                            <td class="fw-bold text-warning">${c.lot_size}</td>
-                            <td>
-                                <button class="btn btn-sm btn-success py-0 px-2" ${dis} onclick="manualOrder('${c.symbol}','buy')">Buy</button>
-                                <button class="btn btn-sm btn-danger py-0 px-2 ms-1" ${dis} onclick="manualOrder('${c.symbol}','sell')">Sell</button>
-                            </td>
-                        </tr>
-                    `;
-                });
-                tbody.innerHTML = html;
-                document.getElementById('last-update').innerText = "Live: " + new Date().toLocaleTimeString();
+                renderTable(data);
             } catch(e){}
+            if (isScanning) {
+                scanTimer = setTimeout(runScanLoop, 3000);
+            }
         }
 
-        loadConfigAndWallet();
-        loadCharts('BTCUSDT');
-        refreshScanner();
-        checkTradeAndJournal();
-        setInterval(() => { refreshScanner(); checkTradeAndJournal(); }, 2500);
+        function renderTable(data) {
+            const tbody = document.getElementById('scanner-tbody');
+            if (!data || data.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="10" class="text-center py-4 text-secondary">No symbols found in watchlist.</td></tr>`;
+                return;
+            }
+
+            let buyCnt = 0, sellCnt = 0;
+            let html = '';
+            data.forEach(c => {
+                if (c.signal === 'BUY') buyCnt++;
+                if (c.signal === 'SELL') sellCnt++;
+
+                let sigBadge = c.signal === 'BUY' ? 'badge-buy' : (c.signal === 'SELL' ? 'badge-sell' : 'badge-neutral');
+
+                html += `
+                    <tr>
+                        <td class="fw-bold text-white">${c.symbol}</td>
+                        <td>$${c.close}</td>
+                        <td>$${c.open}</td>
+                        <td>${c.rsi}</td>
+                        <td>${c.ema_fast}</td>
+                        <td>${c.ema_slow}</td>
+                        <td class="${c.candle==='Green'?'text-success':'text-danger'} fw-bold">${c.candle}</td>
+                        <td>${c.momentum}</td>
+                        <td>${c.trend}</td>
+                        <td><span class="${sigBadge}">${c.signal}</span></td>
+                    </tr>
+                `;
+            });
+
+            tbody.innerHTML = html;
+            document.getElementById('cnt-total').innerText = data.length;
+            document.getElementById('cnt-buy').innerText = buyCnt;
+            document.getElementById('cnt-sell').innerText = sellCnt;
+        }
+
+        function toggleConnect() {
+            const btn = document.getElementById('conn-btn');
+            const status = document.getElementById('conn-status');
+            if (btn.innerText === 'Disconnect') {
+                btn.innerText = 'Connect';
+                btn.className = 'btn btn-success w-100 btn-sm fw-bold';
+                status.innerText = '🔴 Disconnected';
+                status.className = 'badge bg-danger px-3 py-2';
+            } else {
+                btn.innerText = 'Disconnect';
+                btn.className = 'btn btn-outline-light w-100 btn-sm fw-bold';
+                status.innerText = '🟢 Connected to Delta Exchange';
+                status.className = 'badge bg-success px-3 py-2';
+            }
+        }
+
+        loadState();
     </script>
 </body>
 </html>
@@ -686,95 +496,29 @@ HTML_TEMPLATE = """
 def home():
     return render_template_string(HTML_TEMPLATE)
 
-@app.route('/api/wallet')
-def api_wallet():
-    return jsonify(fetch_delta_wallet_balance())
-
-@app.route('/api/journal')
-def api_journal():
-    return jsonify(load_journal())
-
-@app.route('/api/test_telegram', methods=['POST'])
-def api_test_telegram():
-    ok = send_telegram_alert(
-        "📲 *Mobile Connection Successful!*\n"
-        "Multi-Exchange Scanner & Bot are fully connected to your phone."
-    )
-    if ok:
-        return jsonify({"status": "ok", "message": "Test alert successfully sent to your Telegram mobile!"})
-    return jsonify({"status": "error", "message": "Alert failed! Please open @KeltnerPulseBot on Telegram and press Start."})
+@app.route('/api/state', methods=['GET', 'POST'])
+def handle_state():
+    if request.method == 'POST':
+        cfg = load_config()
+        cfg.update(request.json)
+        save_config(cfg)
+        return jsonify({"status": "saved"})
+    return jsonify(load_config())
 
 @app.route('/api/scan')
 def api_scan():
-    mode = request.args.get('mode', 'swing').lower()
-    now = time.time()
-    if SCAN_CACHE[mode]["data"] and (now - SCAN_CACHE[mode]["ts"] < 5):
-        return jsonify(SCAN_CACHE[mode]["data"])
-
     cfg = load_config()
+    watchlist = cfg.get("watchlist", DEFAULT_WATCHLIST)
     results = []
     with ThreadPoolExecutor(max_workers=6) as executor:
-        futures = [executor.submit(analyze_coin, sym, mode, cfg) for sym in FUTURES_WATCHLIST]
+        futures = [executor.submit(analyze_coin, sym, cfg) for sym in watchlist]
         for f in futures:
             res = f.result()
             if res:
                 results.append(res)
-                if res['signal'] in ['STRONG LONG', 'STRONG SHORT']:
-                    cd_key = f"{res['symbol']}_{res['signal']}"
-                    if now - ALERT_COOLDOWN.get(cd_key, 0) > 600:
-                        ALERT_COOLDOWN[cd_key] = now
-                        send_telegram_alert(
-                            f"🚨 *STRATEGY SIGNAL ALERT ({res['mode']})*\n"
-                            f"🪙 Coin: `{res['symbol']}`\n"
-                            f"⚡ Signal: *{res['signal']}*\n"
-                            f"💵 Price: `${res['price']}`\n"
-                            f"📊 Vol Spike: `{res['vol_spike']}%`\n"
-                            f"🛑 SL: `${res['sl']}` | 🎯 TP: `${res['target']}`"
-                        )
-                    if cfg.get("auto_trade") and not load_trade_state().get("active_trade"):
-                        side = "buy" if res['signal'] == 'STRONG LONG' else "sell"
-                        place_system_trade(res['symbol'], side, res['lot_size'], res['price'], res['sl'], res['target'], "Auto-Trade Bot")
-
-    SCAN_CACHE[mode] = {"ts": now, "data": results}
+                if res['signal'] in ['BUY', 'SELL']:
+                    send_telegram_alert(f"🚨 *Tradehull Signal Alert*\n📌 Symbol: `{res['symbol']}`\n⚡ Signal: *{res['signal']}* @ `${res['close']}`\n📊 RSI: `{res['rsi']}`")
     return jsonify(results)
-
-@app.route('/api/config', methods=['GET', 'POST'])
-def handle_config():
-    if request.method == 'POST':
-        old_cfg = load_config()
-        new_cfg = request.json
-        for k, v in new_cfg.items():
-            if v is not None and v != "":
-                old_cfg[k] = v
-        save_config(old_cfg)
-        return jsonify({"status": "saved"})
-    return jsonify(load_config())
-
-@app.route('/api/trade_state', methods=['GET'])
-def get_trade_state(): return jsonify(load_trade_state())
-
-@app.route('/api/close_active_trade', methods=['POST'])
-def close_trade():
-    state = load_trade_state()
-    if state.get("active_trade"):
-        t = state["active_trade"]
-        raw = fetch_multi_exchange_candles(t['symbol'], '1h', 3)
-        exit_price = float(raw[-1]['close']) if raw else t['entry_price']
-        diff = (exit_price - t['entry_price']) if t['side'] == 'BUY' else (t['entry_price'] - exit_price)
-        pnl_usd = round(diff * t['qty'], 2)
-        save_to_journal({
-            "symbol": t['symbol'], "side": t['side'], "qty": t['qty'],
-            "entry": t['entry_price'], "exit": exit_price, "pnl": pnl_usd,
-            "exit_time": time.strftime("%Y-%m-%d %H:%M:%S")
-        })
-        save_trade_state({"active_trade": None})
-    return jsonify({"status": "trade_cleared"})
-
-@app.route('/api/order', methods=['POST'])
-def execute_order():
-    d = request.json
-    res = place_system_trade(d.get('symbol'), d.get('side'), d.get('qty', 1), d.get('price', 0), d.get('sl', 0), d.get('target', 0), "Dashboard")
-    return jsonify(res)
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5050))
